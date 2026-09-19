@@ -37,7 +37,7 @@ def _setup(tmp_path: Path) -> tuple[Path, Path]:
     (base / "skills" / "INDEX.json").write_text('{"skills": {}}', encoding="utf-8")
     (base / "agents").mkdir()
     (base / "agents" / "INDEX.json").write_text('{"agents": {}}', encoding="utf-8")
-    wf = base / "skills" / "workflow" / "references"
+    wf = base / "skills" / "process" / "workflow" / "references"
     wf.mkdir(parents=True)
     (wf / "pipeline-index.json").write_text('{"pipelines": {}}', encoding="utf-8")
     home = tmp_path / "home"
@@ -55,7 +55,7 @@ def _input_hash(sdir: Path) -> str:
         base / "skills" / "INDEX.local.json",
         base / "agents" / "INDEX.json",
         base / "agents" / "INDEX.local.json",
-        base / "skills" / "workflow" / "references" / "pipeline-index.json",
+        base / "skills" / "process" / "workflow" / "references" / "pipeline-index.json",
     ]
     h = hashlib.sha256()
     for f in files:

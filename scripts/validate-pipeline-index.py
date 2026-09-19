@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate that every pipeline in pipeline-index.json points at a real doc.
 
-``skills/workflow/references/pipeline-index.json`` is hand-maintained — the
+``skills/process/workflow/references/pipeline-index.json`` is hand-maintained — the
 generator that builds skills/INDEX.json and agents/INDEX.json skips it. Nothing
 else checks it either: ``scripts/validate-do-references.py`` resolves component
 *names* mentioned in prose, so an entry whose ``file`` points at a deleted doc
@@ -54,7 +54,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-DEFAULT_INDEX = REPO_ROOT / "skills" / "workflow" / "references" / "pipeline-index.json"
+DEFAULT_INDEX = REPO_ROOT / "skills" / "process" / "workflow" / "references" / "pipeline-index.json"
 
 
 def heading_text(doc: Path) -> str:
@@ -137,7 +137,7 @@ def main() -> int:
         "--index",
         type=Path,
         default=DEFAULT_INDEX,
-        help="Index to validate (default: skills/workflow/references/pipeline-index.json)",
+        help="Index to validate (default: skills/process/workflow/references/pipeline-index.json)",
     )
     args = parser.parse_args()
 

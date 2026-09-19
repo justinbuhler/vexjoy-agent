@@ -39,7 +39,7 @@ Input schema (missing optional fields degrade gracefully — block omitted):
       "agent": "python-general-engineer",          // required; unknown => coerced
       "fallback_reason": "no-specialist-match",    // required when the agent is
                                                    // general-purpose; slugified
-      "skill": "test-driven-development",          // required for simple/medium/
+      "skill": "testing",          // required for simple/medium/
                                                    // complex; trivial => skill=-
       "complexity": "medium",                      // required enum, case-insensitive:
                                                    // trivial|simple|medium|complex
@@ -90,7 +90,7 @@ from functools import lru_cache
 from pathlib import Path
 
 # INSTALL_ROOT keeps the invoked path: through ~/.claude/scripts -> <repo>/scripts,
-# inventories (INDEX.json, settings, hook_utils) must come from the install dir,
+# inventories (INDEX.json, settings, hook_utils) must come from the deploy dir,
 # which a profile filter may have shaped. REPO_ROOT resolves the symlink; it is
 # the gather/validation fallback only, since ~/.claude is not a git repo.
 INSTALL_ROOT = Path(__file__).absolute().parent.parent
@@ -219,7 +219,7 @@ _FALLBACK_REASON_MAX = 80
 # Complexities where a skill is mandatory. do/SKILL.md already states this as
 # the "Skill-greediness gate (HARD — non-negotiable for Simple+)"; 23 of the 128
 # recorded fallbacks violated it because nothing enforced it. Trivial dispatches
-# stay exempt (they carry no skill by design).
+# stay exempt (they carry no skill by frontend).
 _SKILL_REQUIRED_COMPLEXITY = frozenset({"simple", "medium", "complex"})
 
 # Complexity -> thinking directive. Trivial never dispatches; medium is

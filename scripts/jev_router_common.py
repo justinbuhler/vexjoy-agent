@@ -321,8 +321,20 @@ def _count_call(
 
 
 TYPESAFE_PLUGIN_KEY = "typesafe@typesafe-ai"
-TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
+TYPESAFE_BASE_URL = "https://api.typesafe.ai"
+TYPESAFE_URL = f"{TYPESAFE_BASE_URL}/v1/systemone"
 JEV_MODEL = "jev-latest"
+
+
+def typesafe_url() -> str:
+    """Return the System One endpoint, honoring ``TYPESAFE_BASE_URL``.
+
+    Resolved per call, not at import: ``jev_transport`` loads ``~/.env`` after
+    importing this module, so an import-time read would miss the file. Set the
+    base to ``https://openrouter.ai/api`` to bill Jev through OpenRouter, which
+    serves the same wire format at ``/v1/systemone``.
+    """
+    return os.environ.get("TYPESAFE_BASE_URL", TYPESAFE_BASE_URL).strip().rstrip("/") + "/v1/systemone"
 
 
 def _read_json_object(path: Path) -> dict:
@@ -541,7 +553,7 @@ def call_jev(
     # --- Network call ---
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
-        TYPESAFE_URL,
+        typesafe_url(),
         data=body,
         method="POST",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -872,7 +884,7 @@ def bound_text(text: str, limit: int, label: str = "") -> str:
         return text
     omitted = len(text) - limit
     if label:
-        notice = f"[{omitted} chars omitted from {label}]\n"
+        notice = f"[{omitted} chars omitted from {label}]\n"  # nosec: truncation notice, not SQL
     else:
         notice = f"[{omitted} chars omitted]\n"
     # Reserve room for the notice itself.

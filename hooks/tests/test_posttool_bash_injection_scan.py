@@ -100,9 +100,13 @@ class TestExtractWrittenPathsNegative:
 
 class TestResolvePath:
     def test_absolute_path(self):
+        """An absolute path is resolved in place, never joined onto cwd."""
         result = _resolve_path("/home/user/file.md")
         assert result is not None
-        assert result == Path("/home/user/file.md")
+        # Compare against the same resolution: macOS reaches /home through a
+        # firmlink, so the literal path is not what resolve() returns there.
+        assert result == Path("/home/user/file.md").resolve()
+        assert not result.is_relative_to(Path.cwd())
 
     def test_relative_path(self):
         result = _resolve_path("agents/test.md")

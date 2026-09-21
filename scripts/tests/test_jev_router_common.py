@@ -718,3 +718,25 @@ class TestErrorTextCarriesNoBody:
         with pytest.raises(RuntimeError) as err:
             common.call_jev(self._payload("err-402"), "k", 5)
         assert str(err.value) == "HTTP 402 (billing_error)"
+
+
+class TestTypesafeUrl:
+    """``TYPESAFE_BASE_URL`` redirects the direct transport to an API-compatible host."""
+
+    def test_defaults_to_typesafe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unset base URL keeps TypeSafe's own endpoint."""
+        monkeypatch.delenv("TYPESAFE_BASE_URL", raising=False)
+        assert common.typesafe_url() == "https://api.typesafe.ai/v1/systemone"
+
+    @pytest.mark.parametrize(
+        "base", ["https://openrouter.ai/api", "https://openrouter.ai/api/", "  https://openrouter.ai/api  "]
+    )
+    def test_openrouter_base_is_normalized(self, monkeypatch: pytest.MonkeyPatch, base: str) -> None:
+        """Trailing slashes and surrounding whitespace never double the path separator."""
+        monkeypatch.setenv("TYPESAFE_BASE_URL", base)
+        assert common.typesafe_url() == "https://openrouter.ai/api/v1/systemone"
+
+    def test_resolved_per_call_not_at_import(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """jev_transport loads ~/.env after importing this module, so the read must be late."""
+        monkeypatch.setenv("TYPESAFE_BASE_URL", "https://example.test")
+        assert common.typesafe_url() == "https://example.test/v1/systemone"

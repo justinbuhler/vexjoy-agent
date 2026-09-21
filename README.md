@@ -57,7 +57,18 @@ export AI_GATEWAY_API_KEY=...
 # Preferred: Jev's direct API
 export JEV_TRANSPORT=direct
 export TYPESAFE_API_KEY=...
+
+# Bill the direct API through OpenRouter instead of TypeSafe
+export TYPESAFE_BASE_URL=https://openrouter.ai/api
+export TYPESAFE_API_KEY=sk-or-v1-...
+export JEV_KEY_ONLY=1
 ```
+
+`TYPESAFE_BASE_URL` points the direct transport at any host serving the same
+System One wire format at `/v1/systemone`; OpenRouter does. It does not affect
+the Vercel transport, which reaches Jev through the AI SDK gateway provider
+rather than a URL. Set `JEV_KEY_ONLY=1` with OpenRouter so the scripts that
+gate on the `typesafe@typesafe-ai` plugin accept a key alone.
 
 `JEV_TRANSPORT=auto` is the default. It prefers the direct API when
 `TYPESAFE_API_KEY` is set, then uses Vercel when only

@@ -70,8 +70,11 @@ def _install_fake_gh(tmp_dir: str, checks_json: str) -> str:
     # being silently absorbed by the stub.
     script = (
         "#!/usr/bin/env python3\n"
-        "import sys\n"
+        "import sys, os, json\n"
         "args = sys.argv[1:]\n"
+        "_log = os.environ.get('FAKE_GH_ARGV_LOG')\n"
+        "if _log:\n"
+        "    open(_log, 'a').write(json.dumps(args) + '\\n')\n"
         f"CHECKS = {checks_json!r}\n"
         "if args[:2] == ['pr', 'checks']:\n"
         "    # Contract: gh pr checks <PR> --json name,state,bucket\n"
@@ -122,6 +125,7 @@ def run_hook(
     if tmp_path is not None:
         bin_dir = _install_fake_gh(str(tmp_path), gh_checks_json)
         env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+        env["FAKE_GH_ARGV_LOG"] = os.path.join(str(tmp_path), "gh-argv.log")
     return subprocess.run(
         [sys.executable, HOOK],
         input=event,
@@ -287,3 +291,51 @@ class TestCIStatusGate:
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
         assert "CI checks are failing" in reason  # denial is from the CI gate
         assert "--admin" not in reason
+
+
+def _gh_argv(tmp_path) -> list[list[str]]:
+    """Return every argv the fake `gh` was invoked with, oldest first."""
+    log = tmp_path / "gh-argv.log"
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+class TestRepoSelectorPassthrough:
+    """The gate must read checks from the repo the merge targets.
+
+    Without --repo, `gh` resolves the repo from the working directory's
+    remotes. Merging a fork PR while `origin` is upstream then gates on an
+    unrelated upstream PR sharing the number.
+    """
+
+    def test_repo_flag_reaches_pr_checks(self, tmp_path):
+        """--repo owner/name on the merge command is forwarded to gh pr checks."""
+        r = run_hook("gh pr merge 55 --repo octo/fork --squash", tmp_path=tmp_path)
+        assert r.returncode == 0
+        checks = [a for a in _gh_argv(tmp_path) if a[:2] == ["pr", "checks"]]
+        assert checks, "hook never called gh pr checks"
+        assert "--repo" in checks[0] and "octo/fork" in checks[0]
+
+    def test_equals_form_is_forwarded(self, tmp_path):
+        """--repo=owner/name is forwarded too."""
+        run_hook("gh pr merge 55 --repo=octo/fork --squash", tmp_path=tmp_path)
+        checks = [a for a in _gh_argv(tmp_path) if a[:2] == ["pr", "checks"]]
+        assert checks[0][checks[0].index("--repo") + 1] == "octo/fork"
+
+    def test_short_flag_is_forwarded(self, tmp_path):
+        """-R owner/name is gh's short form for --repo."""
+        run_hook("gh pr merge 55 -R octo/fork --squash", tmp_path=tmp_path)
+        checks = [a for a in _gh_argv(tmp_path) if a[:2] == ["pr", "checks"]]
+        assert checks[0][checks[0].index("--repo") + 1] == "octo/fork"
+
+    def test_absent_repo_stays_absent(self, tmp_path):
+        """With no repo named, gh's own working-directory resolution is left alone."""
+        run_hook("gh pr merge 55 --squash", tmp_path=tmp_path)
+        checks = [a for a in _gh_argv(tmp_path) if a[:2] == ["pr", "checks"]]
+        assert "--repo" not in checks[0]
+
+    def test_repo_flag_reaches_pr_view_fallback(self, tmp_path):
+        """Resolving the PR number by branch must also target the named repo."""
+        run_hook("gh pr merge --repo octo/fork --squash", tmp_path=tmp_path)
+        views = [a for a in _gh_argv(tmp_path) if a[:2] == ["pr", "view"]]
+        assert views, "hook never called gh pr view"
+        assert views[0][views[0].index("--repo") + 1] == "octo/fork"

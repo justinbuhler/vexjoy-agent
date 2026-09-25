@@ -18,6 +18,29 @@ from hook_utils import deny_tool_use, record_governance
 from stdin_timeout import read_stdin
 
 
+def repo_flag(parts: list[str]) -> list[str]:
+    """Return the merge command's repo selector as ``gh`` arguments, else ``[]``.
+
+    Without it, ``gh`` resolves the repository from the working directory's
+    remotes and reads whichever repo ``origin`` points at. Merging a fork PR
+    while ``origin`` is upstream makes the hook gate on an unrelated upstream
+    PR that happens to share the number.
+
+    Args:
+        parts: The intercepted command split on whitespace.
+
+    Returns:
+        (list) ``["--repo", "owner/name"]``, or an empty list when the command
+        names no repo and ``gh``'s own resolution is correct.
+    """
+    for i, part in enumerate(parts):
+        if part in ("--repo", "-R") and i + 1 < len(parts):
+            return ["--repo", parts[i + 1]]
+        if part.startswith("--repo="):
+            return ["--repo", part.split("=", 1)[1]]
+    return []
+
+
 def main() -> None:
     data = json.loads(read_stdin(timeout=2))
 
@@ -31,6 +54,7 @@ def main() -> None:
         return
 
     parts = command.split()
+    repo = repo_flag(parts)
 
     # --- Block --admin before any CI check ---
     if "--admin" in parts:
@@ -63,7 +87,7 @@ def main() -> None:
         # Try to get it from current branch
         try:
             result = subprocess.run(
-                ["gh", "pr", "view", "--json", "number", "--jq", ".number"],
+                ["gh", "pr", "view", *repo, "--json", "number", "--jq", ".number"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -81,7 +105,7 @@ def main() -> None:
     # Check CI status
     try:
         result = subprocess.run(
-            ["gh", "pr", "checks", pr_number, "--json", "name,state,bucket"],
+            ["gh", "pr", "checks", pr_number, *repo, "--json", "name,state,bucket"],
             capture_output=True,
             text=True,
             timeout=15,

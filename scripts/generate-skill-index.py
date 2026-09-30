@@ -430,6 +430,8 @@ def generate_index(
             old_ok = (repo_root / existing["file"]).is_file() if repo_root else False
             if old_ok and not new_ok:
                 return
+            if old_ok and new_ok:
+                warnings.append(f"  - {name}: duplicate skill name — {existing['file']} overwritten by {entry['file']}")
         index[collection_key][name] = entry
 
     for child in sorted(source_dir.iterdir()):
@@ -443,6 +445,16 @@ def generate_index(
         # Check if this directory directly contains a SKILL.md (flat layout)
         if (child / "SKILL.md").exists():
             _process_skill_dir(child)
+            # Hybrid dirs (e.g. skills/process/, skills/research/) have both a top-level SKILL.md and nested skill subdirs.
+            for nested in sorted(child.iterdir()):
+                if not nested.is_dir():
+                    continue
+                if nested.is_symlink() and not include_private:
+                    continue
+                if (nested / "SKILL.md").exists():
+                    _process_skill_dir(nested)
+                elif (nested / "skill" / "SKILL.md").exists():
+                    _process_skill_dir(nested, skill_file_override=nested / "skill" / "SKILL.md")
         # Check for nested skill/SKILL.md layout (e.g., voice-example/skill/SKILL.md)
         elif (child / "skill" / "SKILL.md").exists():
             _process_skill_dir(child, skill_file_override=child / "skill" / "SKILL.md")

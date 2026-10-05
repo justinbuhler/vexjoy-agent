@@ -55,6 +55,7 @@ class PRMiner:
     def __init__(self, github_token: str):
         self.github = Github(github_token)
         self.interactions = []
+        self.failed_repos = []
         self.stats = {"prs_analyzed": 0, "comments_found": 0, "interactions_extracted": 0, "api_calls": 0}
 
     def mine_repo(
@@ -73,6 +74,7 @@ class PRMiner:
             self.stats["api_calls"] += 1
         except GithubException as e:
             print(f"Error accessing repo {repo_name}: {e}")
+            self.failed_repos.append(repo_name)
             return
 
         # Get merged PRs
@@ -357,6 +359,10 @@ Examples:
     # Show summary if requested
     if args.summary:
         miner.show_summary()
+
+    if miner.failed_repos:
+        print(f"\n✗ Failed to access: {', '.join(miner.failed_repos)}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

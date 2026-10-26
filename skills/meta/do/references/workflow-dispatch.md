@@ -1,8 +1,8 @@
-# Workflow Dispatch (Phase 4 Steps 1b/1c)
+# Workflow dispatch
 
-Native-Workflow executor selection and roster rules, moved verbatim from `SKILL.md` Phase 4. Load on: a pipeline `pick`, Complex/tier-4 with no pick, or an explicit "run through a workflow" request.
+Mandatory conditional executor and roster rules. Load on: a pipeline `pick`, Complex/tier-4 with no pick, or an explicit "run through a workflow" request.
 
-**Step 1b (native Workflow dispatch): run the deterministic variant when the harness supports it, else the prose pipeline.** When the Phase 2 Step 0 self-route emitted a pipeline `pick` (#686), select the executor with this ADR decision table (`harness-conditional-workflow-dispatch`):
+**Executor selection (main Phase 4 workflow gate): run the deterministic variant when the harness supports it, else the prose pipeline.** When the Phase 2 semantic selection emitted a pipeline `pick` (#686), select the executor with this ADR decision table (`harness-conditional-workflow-dispatch`):
 
 ```
 pick = route.pipeline                               # #686, may be null
@@ -14,7 +14,7 @@ complex4 = (complexity == Complex) or (tier == 4)   # ADR native-fast-path Stage
 if pick is not None and reg.get(pick) and cap.workflow_capable and (Workflow tool in MY tool list):
         # NAMED pipeline: env proxy AND LLM tool-list self-check (authoritative gate)
                                                             -> Workflow.run(reg[pick], {scope, tier})
-elif pick is not None and reg.get(pick):                    -> run the prose pipeline markdown (unchanged)
+elif pick is not None:                    -> run the prose pipeline markdown (unchanged)
 elif pick is None and complex4 and cap.workflow_capable and (Workflow tool in MY tool list):
         # NO named pipeline + Complex/tier-4: generic native fan-out (Stage 2)
                                                             -> Workflow.run("fan-out-workflow", {scope, tier, roster})
@@ -29,7 +29,7 @@ Build `roster` from the Phase-3 enhancement signals, scaled by `tier`. **Each en
 
 **Banner parity (R4):** expand the pipeline name → phase list for the routing banner on BOTH paths, so it reads identically regardless of executor (e.g. complexity-trigger fan-out shows `fan-out → synthesize`).
 
-**Step 1c (inline-authored Workflow scripts): when the user explicitly asks to "run through a workflow" with no named pipeline `pick`, the orchestrator MUST dictate roster size and skill stacks — never delegate those to the Workflow tool** (whose defaults skew toward many-skeptic adversarial fan-outs and rarely emit the exact Skill-tool call). Before any inline `script:`, build the same `roster` Step 1b uses and pin:
+**Inline-authored Workflow scripts:** when the user explicitly asks to "run through a workflow" with no named pipeline `pick`, the orchestrator MUST dictate roster size and skill stacks — never delegate those to the Workflow tool** (whose defaults skew toward many-skeptic adversarial fan-outs and rarely emit the exact Skill-tool call). Before any inline `script:`, build the same `roster` executor selection uses and pin:
 
 | Constraint | Rule |
 |------------|------|
@@ -53,9 +53,9 @@ Inline `script:` shape (exact Skill-tool calls in EVERY worker, count from the r
 
 ```js
 const ROSTER = [/* dictated count, NOT model-chosen */
-  {agentType: "reviewer-system",       skills: ["systematic-code-review", "anti-rationalization-review"], lens: "security"},
-  {agentType: "reviewer-domain",       skills: ["systematic-code-review", "anti-rationalization-review"], lens: "domain"},
-  {agentType: "reviewer-perspectives", skills: ["systematic-code-review", "anti-rationalization-review"], lens: "newcomer"},
+  {agentType: "reviewer-system",       skills: ["review", "anti-rationalization-core"], lens: "security"},
+  {agentType: "reviewer-domain",       skills: ["review", "anti-rationalization-core"], lens: "domain"},
+  {agentType: "reviewer-perspectives", skills: ["review", "anti-rationalization-core"], lens: "newcomer"},
 ];
 const findings = await parallel(ROSTER.map(r => async () => {
   const prompt = `${skillDirectives(r.skills)}\n${buildPrompt(r)}`;
@@ -64,3 +64,5 @@ const findings = await parallel(ROSTER.map(r => async () => {
 ```
 
 Catching a model-chosen N (`parallel(Array.from({length: N}, ...))`) or a missing exact Skill-tool call means **stop and rebuild the script from the roster table above**.
+
+Every roster entry passes the shared required-router builder protocol before worker execution. Native workflow selection never bypasses the actual-intent check, plan, or gate evidence. The full stack includes prompt injections; invoke Skill only for manifest-callable skill names.

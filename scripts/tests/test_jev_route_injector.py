@@ -38,6 +38,12 @@ _spec.loader.exec_module(_mod)
 hook = _mod  # alias for readability
 
 
+@pytest.fixture(autouse=True)
+def isolated_router_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("JEV_ROUTER_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("JEV_SESSION_ID", "injector-test")
+
+
 # ------------------------------------------------------------------ #
 # Module-level constants (v3: compose/tools removed)
 # ------------------------------------------------------------------ #
@@ -50,6 +56,12 @@ class TestModuleConstants:
         worst_gateway_seconds = 3 * hook.JEV_ROUTE_ATTEMPT_TIMEOUT_SECONDS + 2 * 5
         assert worst_gateway_seconds + 2 <= hook.JEV_ROUTE_TIMEOUT_SECONDS
         assert hook.JEV_ROUTE_TIMEOUT_SECONDS < 26
+
+    def test_detect_pattern_exists(self) -> None:
+        assert hasattr(hook, "DETECT_PATTERN")
+
+    def test_route_timeout_exists(self) -> None:
+        assert hasattr(hook, "JEV_ROUTE_TIMEOUT_SECONDS")
 
 
 # ------------------------------------------------------------------ #
@@ -125,7 +137,7 @@ class TestExtractRequestText:
         assert hook.extract_request_text("/d\nfix the bug") == "fix the bug"
 
     def test_do_does_not_match(self) -> None:
-        assert hook.extract_request_text("/do something") is None
+        assert hook.extract_request_text("/do something") == "something"
 
     def test_design_does_not_match(self) -> None:
         assert hook.extract_request_text("/design a page") is None
@@ -236,6 +248,12 @@ class TestBuildInjection:
         text = hook.build_injection({"forced": None})
         assert "--finalize" in text
         assert "do NOT run scripts/jev-route.py again" in text
+        assert "Phase 1 preparation" in text
+        assert "pick them in Phase 2" in text
+        assert "Phase 5 requires task_spec.intent" in text
+        assert "scripts/build-dispatch.py" in text
+        assert "--router-finalize" in text
+        assert "jev-intent-align.py" not in text
 
 
 # ------------------------------------------------------------------ #

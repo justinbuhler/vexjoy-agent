@@ -1,169 +1,69 @@
-# /d design: session pick, Jev evidence
+# `/d` prepare/finalize contract
 
-Deep reference for `/d` (`skills/meta/d/SKILL.md`). Load it when explaining,
-tuning, or extending the router. SKILL.md's phases are enough to run it.
+Implementation lives in `scripts/jev-route.py` and `jev_transport.py`.
+Preparation collects Jev attachment evidence; the session model selects names
+and complexity using the complete `print-route-rules.py` output and
+request-filtered routing manifest. Jev does not choose the primary route.
 
-## Design in one table
+## Preparation
 
-| Step | Owner | Script |
-|---|---|---|
-| Force-route guard (`pr-workflow`, `pr-pipeline`, `security`) | code | `pre-route.py`, kept by `jev-route.py` prepare |
-| Attachment evidence: 5 signal Nouls, 6 domain Nouls, one Jev call | Jev | `jev-route.py` prepare |
-| Pick agent, skill, pipeline from the full manifest with `/do`'s rule text | session model | `print-route-rules.py`, `get-routing-manifest.sh --request-file` |
-| Validate names against the live manifest, apply the safety force route, attach skills, derive complexity | code | `jev-route.py --finalize` |
-| Check the restated outcome survives the route | Jev | `jev-intent-align.py` (Phase 2) |
+The default command accepts `--request-file`. The deterministic
+`pre-route.py` guard runs first and supplies any protected skill/pipeline.
+The receipt contains `available`, `jev_called`, `source`, `forced`,
+`stack`, `project`, `signals`, `signal_scores`, `domain_scores`,
+`error`, `latency_ms`, and `usage`. It does not contain a selected
+agent, skill, pipeline, or complexity.
 
-Jev supplies evidence and a check. It does not pick the primary route.
+`JEV_TRANSPORT=auto|vercel|direct`; Vercel uses `AI_GATEWAY_API_KEY`,
+direct uses `TYPESAFE_API_KEY`. Auto prefers direct when configured, then
+Vercel; explicit selection never switches. Missing or unusable evidence leaves
+an explicit error. Selection can continue without optional evidence, but
+unavailable intent validation never authorizes execution.
 
-## Why the pick moved to the session
+## Selection and finalization
 
-The earlier design asked Jev two questions per request: a wide rank over the
-catalog, then a shortlist rerank with a fits threshold. Every Jev answer saw
-only a truncated catalog slice, and about a quarter of requests fell back to
-`/do`.
+For Simple+, the session reads all routing rules and manifest candidates,
+then records agent, additional agents, skill, pipeline, complexity, confidence,
+reasoning, and any required general-purpose fallback reason. Preserve the
+protected force route. Trivial proceeds to builder `--router-finalize`
+without selecting a worker.
 
-A paired measurement on `scripts/routing-ab-corpus.json` v1.5 (269 rows) found
-the Jev pick below `/do`'s rule text applied by a model. Both arms got the same
-repo facts for the 91 rows recorded with a workload, and each arm ran twice.
+Run `jev-route.py --finalize --result-file <receipt> --decision-file <pick>`.
+The script validates names against the live manifest, applies protected
+skill/pipeline overrides, supplies skill-owner defaults, and computes `attach`.
+The result contains selected names, source metadata, `attach`, signals, domain
+scores, and `problems`. Correct invalid names and rerun; unresolved problems
+or absent route fields block dependent execution.
 
-| Arm | Pair correct (run 1 / run 2) | General-purpose or null picks |
-|---|---|---|
-| Jev two-stage pick (previous `/d`) | 146 / 146 | 67 / 69 |
-| `/do` rules, model pick (proxy) | 172 | 55 |
-| Session pick plus Jev attachments (this design) | 178 / 178 | 70 / 66 |
+Use the returned attachment order, including protected stack entries and agent
+domain floors, plus required shared rigor. Union the validated additional
+agents with signal-selected research ownership. Each worker needs its own
+scoped handoff and builder check.
 
-The structural cause: the pick needs the whole manifest and the cross-rule
-reading (SECTION-INTEGRITY, SPECIFICITY, COMBINATION DOCTRINE, the two
-greediness gates). A model reading `/do`'s text does that. Per-question Jev
-calls over a shortlist cannot.
+## Required actual-intent validation
 
-Paired change against the previous `/d`, counting a row only when both runs of
-an arm agree: 38 rows recovered, 10 lost, McNemar p < 0.001. Against the `/do`
-proxy, 23 rows only this design got right and 17 only the proxy did (p = 0.43).
+Preparation and finalization permit route preparation only. Both routers pass
+the actual task spec to the builder under `required-router-protocol.md`.
+The builder validates phase/gate evidence and invokes Jev on the proposed intent
+and route. Baseline or cached receipts cannot satisfy this requirement.
+Unavailable, error, review, and essential clarification block worker dispatch
+and direct finalization. Manifest validity does not prove intent alignment;
+aligned intent does not prove completion.
 
-Lost rows fall in three groups:
+## Verification and boundaries
 
-| Group | Rows | Cause |
-|---|---|---|
-| Sibling-skill choice | 61, 133, 211, 214, 245 | The pick chose a close skill (`review` for `assessment`, `workflow` for `domain`, `assessment` for `docs-sync-checker`). The agent was right. `/do` makes the same choice on 133, 211, and 214. |
-| Out-of-catalog request | 21, 78 | The pick returned `general-purpose` and `workflow` for a request no catalog entry covers. Gold wants a content or no-op route. |
-| Weak gold | 34, 123, 129 | Gold is `content`, or no pick at all, and a defensible `writing` or `research` pick scores wrong. |
+Use `scripts/tests/test_jev_route_finalize.py` for membership, defaults,
+protected overrides, and attachments. Changes to rules, manifest descriptions,
+questions, or stack policy require the routing cases in `../EVAL.md`.
+Request and project evidence leave the machine through the configured Jev
+transport; existing private-domain filtering and local-only boundaries remain
+binding. Credentials never belong in arguments, logs, or persisted receipts.
 
-### Held-out follow-up (not a gate)
+## Implementation map
 
-A second set of 67 real requests from 11 repos, labelled before any router ran, scored the new `/d` at 42 and `/do` at 46 on rows right in both of two runs (Sonnet for both; means 44 and 49). The rows carried no repo facts, so `/d` had no `JEV_RESULT.project`; `/d` picked `general-purpose` more often on read-only Go questions. The corpus result above stays the basis for the change.
-
-## Single-sourced rule text
-
-`/do` Phase 2 holds the routing rules. `scripts/print-route-rules.py` prints the
-span from `**Routing rules (ALL apply):**` up to `**Section validator (before
-dispatch):**` straight from `skills/meta/do/SKILL.md`. `/d` never copies it, so
-the two routers cannot drift. `scripts/tests/test_print_route_rules.py` fails when
-an anchor moves or a rule leaves that span. The old hand-written Jev
-instruction strings (the hidden coupling this document used to list as a known
-limitation) are gone.
-
-## What Jev still decides
-
-### Attachment evidence (prepare)
-
-One batched evaluation of 11 Nouls. State: the request, plus project facts
-(languages, frameworks, datastores, names only) when a repo is known.
-
-| Group | Nouls | Used for |
-|---|---|---|
-| Signals | `tests_requested`, `research_needed`, `comprehensive_review`, `local_only`, `objective_loop_worthy` | `SIGNAL_SKILLS` in `jev-route.py` and the complexity derivation |
-| Domain | `programming`, `frontend`, `kubernetes`, `testing`, `building-with-jev`, `research` | Attach the domain skill when the score is 0.6 or higher |
-
-`_noul` accepts a score only inside 0 to 1 and treats anything else as
-missing. A Jev failure or a malformed answer sets `error`, leaves the evidence
-empty, and routing continues.
-
-Measured on the corpus: p50 549 ms, p95 666 ms, mean 820 input and 210 output
-tokens per call.
-
-The measurement ran on the `jev-latest` alias, which pointed at `jev-1.13.0`. TypeSafe moves the alias to `jev-1.14.0` about a week after its 2026-10-14 release. Rerun the `d-prepare` arm (see "Re-running the measurement") after the move before trusting the 0.6 attachment floor, and read `model` in each response to see which version answered.
-
-### Attachment policy (finalize)
-
-`_attachments` builds `attach` in this order and stops at three skills: the
-pre-route stack, the agent's domain floor (`DOMAIN_SKILL_BY_AGENT`), domain
-Nouls at 0.6 or higher by score, then `SIGNAL_SKILLS`. Names outside the live
-manifest drop out. `_default_agent` fills a null or `general-purpose` agent from
-the skill's owner (`AGENT_BY_SKILL`).
-
-### Intent alignment (Phase 2)
-
-Unchanged: one batched `jev-intent-align.py` evaluation of the agent's
-`PROPOSED_INTENT` against the route. The route is the finalized `ROUTE`.
-
-## What code enforces
-
-| Rule | Where |
-|---|---|
-| A safety force route (`pr-workflow`, `pr-pipeline`, high-confidence `security`) overrides the picked skill and pipeline | `finalize`, matching `/do` Step 1(a) |
-| Other force matches and suggestions are not passed to the pick | `_forced`, matching `/do` Step 1(b) |
-| A name outside `AGENTS:`, `SKILLS:`, or `PIPELINES:` is dropped and listed in `problems` | `finalize` |
-| The router entry points `d` and `do` are never valid skills | `finalize` |
-| A skill name in the agent slot moves to the skill slot | `finalize` |
-| An empty skill becomes `workflow` (`skill_source: "fallback"`), the skill-greediness gate's default | `finalize` |
-| `general-purpose` without a `fallback_reason` is a problem | `finalize` |
-
-## Cost per request
-
-| Part | Previous `/d` | This design |
-|---|---|---|
-| Jev calls before the pick | 2 (rank, rerank), about 9k Jev tokens | 1, about 800 input and 210 output tokens |
-| Jev intent alignment | 1 batched call | 1 batched call |
-| Session context for the pick | route JSON only | `/do` rules (about 2k tokens) plus the manifest (about 10k tokens), read once |
-| Fallback to `/do` | 26% of requests, then the full `/do` read | none |
-| Pick cost in the eval (`claude -p`, prompt cache warm) | n/a | $0.019 per request on Sonnet |
-
-The session pays the manifest read on every Simple-and-above request. The
-previous `/d` paid it on the 26% that fell back, plus two Jev calls on all of
-them.
-
-## Gateway presence
-
-`scripts/jev_transport.py` selects the transport (`JEV_TRANSPORT=auto|vercel|direct`).
-Auto prefers `AI_GATEWAY_API_KEY`, then `TYPESAFE_API_KEY`. The presence check is
-not a health check: a configured Jev that is down still attempts the call and
-sets `error` on the failure.
-
-## Confident-wrong risk
-
-The session pick has no independent verifier. A confident wrong pick is
-dispatched as-is, and the Phase 2 intent check sees only the restated outcome and
-the route, not the catalog. The membership check catches invented names, not
-wrong real ones.
-
-The backstop is the eval gate: `SAFETY_BUCKETS` (`benchmark-force_route`,
-`false-positive-guard`, `paraphrase-git`, `paraphrase-security`) are checked
-bucket by bucket on every full run. `benchmark-force_route`, `paraphrase-git`,
-and `paraphrase-security` are also protected at runtime, because `pre-route.py`
-catches them before the session picks and `finalize` pins the result.
-`false-positive-guard` has no runtime backstop in `/d` or `/do`: idiom traps rely
-on the model reading means, not words.
-
-On this design: `paraphrase-git` 6/6 and `paraphrase-security` 4/4 in both runs,
-`benchmark-force_route` 5/7 in both runs (two rows where the pick chose a
-language agent and a close skill), `false-positive-guard` 6/7 in both runs.
-
-## Data egress
-
-Prepare sends the request text and, when a repo is known, project facts (names
-only) to the Jev gateway. Intent alignment sends the request, the restated
-intent, and the route. Catalog text never leaves the machine: the manifest goes
-to the session model only. Before this design, every request also sent catalog
-names and descriptions to Jev in both pick stages.
-
-## Re-running the measurement
-
-```bash
-python3 scripts/jev-eval.py --out-dir <fresh-dir> --workload-dir <name>=<dir-with-requirements.txt>
-python3 scripts/router_attachment/run_eval.py --router d-prepare --out <fresh>/d-prepare.json
-python3 scripts/router_attachment/run_eval.py --router d-model --jev-results <fresh>/d-prepare.json --out <fresh>/d-model.json
-```
-
-Run each arm twice. A rerun with unchanged code changes the pick on about 11%
-of rows, so count a row as changed only when both runs agree.
+- `scripts/jev-route.py`: preparation and finalization receipts
+- `scripts/print-route-rules.py`: complete session selection rules
+- `scripts/pre-route.py`, `routing-manifest.py`: protected guards and membership
+- `scripts/jev_transport.py`, `jev_vercel.py`, `jev_gateway/jev_vercel_gateway.mjs`: transport
+- `scripts/build-dispatch.py`: required actual-intent gate and dispatch
+- `hooks/jev-route-injector-userprompt.py`: optional preparation precompute

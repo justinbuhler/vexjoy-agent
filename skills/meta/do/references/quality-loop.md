@@ -1,4 +1,4 @@
-# Quality Loop
+# Routed quality loop
 
 For Medium+ code changes, use the agent and skill already selected by `/do`.
 Do not change routing or replace domain instructions. Trivial, Simple, review-only,
@@ -15,12 +15,13 @@ they are checkpoints, not fourteen mandatory agent calls or tracking tasks.
   `python3 ~/.claude/scripts/adr-query.py register adr/{name}.md`.
   For other changes, read an active `.adr-session.json` and its ADR when present;
   do not create an unrelated ADR.
-- **1 — Plan:** Keep `task_plan.md` brief: original request, acceptance criteria,
+- **1 — Plan:** The router creates `task_plan.md`; the worker reads and updates that same plan.
+  Keep it brief: original request, acceptance criteria,
   approach, affected files, and material risks. Use it to resume longer work and
   check the result against the request. Do not create a separate task for every
   checkpoint.
 - **2 — Implement:** Use one feature branch and worktree. Before creating it, run
-  `worktree_capacity.py --strict` as described in `references/worktree-rules.md`.
+  `worktree_capacity.py --strict` as described in `worktree-rules.md`.
   Reuse the checkout for fixes; preserve unrelated work. Give the selected agent
   the task, domain references, worktree rules, and instruction to commit its changes.
 
@@ -52,8 +53,8 @@ existing phase gate.
   and acceptance criteria. Identify omissions and unintended changes. This check
   is required; a separate verifier is optional unless the project requires one.
 - **6 — Live behavior:** For changed web behavior, use installed Playwright and the
-  configured dev server when needed to verify rendering or interactions. Follow
-  `e2e-testing` or `wordpress-live-validation`. Allow 60 seconds for startup and
+  configured dev server when needed to verify rendering or interactions. Follow the applicable `testing` browser references or `domain` WordPress
+  validation references. Allow 60 seconds for startup and
   30 seconds per page. Run required browser suites even when unit tests pass.
   If unavailable, report the unverified behavior; a required failed or unavailable
   check blocks completion. Do not downgrade a reproduced correctness failure to

@@ -3,7 +3,7 @@
 
 ADR-182's six-hook Bash-only allowlist was correct for the older Codex hook
 surface. Codex now supports apply_patch aliases and more lifecycle events.
-These tests pin the reviewed 71-registration accounting so a new Claude hook
+These tests pin the reviewed registration accounting so a new Claude hook
 cannot silently create or remove Codex coverage.
 """
 
@@ -91,11 +91,41 @@ def test_apply_patch_entries_use_patch_mode_and_alias_matcher() -> None:
     assert all(entry["classification"] == "adapted" for entry in patch_entries)
 
 
-def test_failure_closed_is_limited_to_pretool_enforcement() -> None:
-    """Observers continue on adapter failure; only pre-action gates fail closed."""
+def test_failure_closed_is_limited_to_enforcement() -> None:
+    """Observers fail open; action gates and mandatory router lifecycle fail closed."""
     closed = [entry for entry in _entries() if entry["failure_policy"] == "closed"]
     assert closed
-    assert all(entry["event"] == "PreToolUse" for entry in closed)
+    assert all(
+        entry["event"] == "PreToolUse"
+        or entry["filename"] in {"router-required-gate.py", "jev-route-injector-userprompt.py"}
+        for entry in closed
+    )
+
+
+def test_unsupported_boundaries_are_exact() -> None:
+    """Absent and semantically incomplete paths remain visibly unsupported."""
+    assert {
+        ("PreToolUse", "router-required-gate.py"),
+        ("PreToolUse", "reference-loading-enforcer.py"),
+        ("PreToolUse", "creation-protocol-enforcer.py"),
+        ("PreToolUse", "pretool-section-integrity-validator.py"),
+        ("PreToolUse", "pretool-dispatch-spec-gate.py"),
+        ("PostToolUse", "usage-tracker.py"),
+        ("PostToolUse", "review-capture.py"),
+        ("PostToolUse", "routing-decision-recorder.py"),
+        ("PostToolUse", "session-task-registry.py"),
+        ("StopFailure", "stop-failure-handler.py"),
+        ("PostCompact", "postcompact-handler.py"),
+        ("UserPromptSubmit", "pending-advisory-injector-userprompt.py"),
+    } == UNSUPPORTED_REGISTRATIONS
+
+
+def test_unsupported_inventory_has_machine_owned_precise_reasons() -> None:
+    """Every excluded registration carries a reviewable production reason."""
+    reasons = GENERATOR.UNSUPPORTED_REGISTRATIONS
+    assert len(reasons) == 12
+    assert all(isinstance(reason, str) and len(reason.split()) >= 6 for reason in reasons.values())
+    assert all("unsupported" not in reason.lower() for reason in reasons.values())
 
 
 def test_codex_adapter_is_accounted_as_a_generated_dispatch_target() -> None:

@@ -45,10 +45,13 @@ const MAX_GOAL_CHARS = 500;
 const ABRIDGE_TEXT_THRESHOLD = 550;
 const ABRIDGE_HEAD = 400;
 const ABRIDGE_TAIL = 150;
-const JEV_URL = 'https://api.typesafe.ai/v1/systemone';
 /** A Jev request that has not answered by now counts as failed, so a hung request cannot hang the session. */
 const JEV_TIMEOUT_MS = 20000;
 const JEV_MODEL = 'jev-1.14.0';
+// TYPESAFE_BASE_URL bills Jev through another host serving the same wire
+// format (https://openrouter.ai/api). Default is TypeSafe's own API.
+const JEV_BASE_URL = (process.env.TYPESAFE_BASE_URL || 'https://api.typesafe.ai').trim().replace(/\/+$/, '');
+const JEV_URL = `${JEV_BASE_URL}/v1/systemone`;
 /**
  * After a `{skip}` (Jev found nothing to prune) the transcript is unchanged,
  * so asking again next turn only repeats the same cold-cache Jev pass. Retry

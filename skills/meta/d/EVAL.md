@@ -19,61 +19,40 @@ agree.
 
 | # | Request | Expected | Mechanism under test |
 |---|---|---|---|
-| 1 | "push my changes" | pr-workflow, `source: "pre-route-force"`; you pick the agent | safety force route keeps its skill |
-| 2 | "Push back on this architecture before we commit to it" | NOT pr-workflow | FORCE rule: means, not words |
-| 3 | "Commit these changes and push to origin" | pr-workflow, `source: "pre-route-force"` | genuine git intent |
-| 4 | "Fish for compliments from the design team before shipping" | NOT shell-config | FORCE rule (fish = search) |
-| 5 | "Configure my fish shell prompt to show git branch" | shell-config | genuine Fish shell intent |
-| 6 | "Make it public that we're hosting a charity stream next week" | NOT public-web-deploy | FORCE rule (make public != deploy) |
-| 7 | "Compare static site generators for a docs site" | NOT public-web-deploy (force) | work-on-a-site guard |
-| 8 | "Deploy my landing page to Vercel" | public-web-deploy | genuine deploy intent + companion word |
-| 9 | "help me plan a birthday party" | some sensible agent/skill | end-to-end path exercised |
-| 10 | (simulate) both Jev keys unset | `error` set, `available: false`; routing still picks; `attach` holds only the pre-route stack and domain floor | Jev failure never blocks routing |
-| 11 | (simulate) a decision naming a skill in `agent` | `--finalize` moves it to `skill`, lists it in `problems` | section validator |
-| 12 | "thanks" / "hi" / "say hello" / "what is 2+2" | Trivial per `/do` Phase 1: no dispatch, Phase 2 still runs | Trivial path |
+| 1 | "push my changes" | pr-workflow, `source: "pre-route-force"`; session picks the agent | pre-route guard preserves the protected skill |
+| 2 | "Push back on this architecture before we commit to it" | NOT pr-workflow | idiom guard (pushback/commit) |
+| 3 | "Commit these changes and push to origin" | pr-workflow, force-route | genuine git intent |
+| 4 | "Fish for compliments from the design team before shipping" | NOT a forced deploy route | idiom guard (fish=search) |
+| 5 | "Configure my fish shell prompt to show git branch" | deploy | genuine Fish shell intent |
+| 6 | "Make it public that we're hosting a charity stream next week" | NOT a forced deploy route | idiom guard (make public != deploy) |
+| 7 | "Compare static site generators for a docs site" | NOT a forced deploy route | work-on-a-site guard |
+| 8 | "Deploy my landing page to Vercel" | deploy | genuine deploy intent + companion word |
+| 9 | "help me plan a birthday party" | sensible agent/skill selected by the session and validated by `--finalize` | complete rules and manifest selection |
+| 10 | (simulate) both Jev keys unset | unavailable attachment evidence; route selection continues, actual-intent gate remains pending | no false aligned receipt |
+| 11 | Multi-agent request | selected agents remain manifest-valid after `--finalize` | fan-out membership validation |
+| 12 | "thanks" / "hi" / "say hello" / "what is 2+2" | session selects Trivial; builder `--router-finalize` validates actual intent before direct handling | no trivial intent-gate bypass |
 
-**Known result (2026-09-22)**: case 6 resolves to `content`, not a deploy
-skill. `pre-route.py` still matches it (the word "hosting" satisfies the
-"make it public" companion-word gate); a non-safety force match is no longer
-shown to the pick, so the session decides.
+Cases 6–8 distinguish public announcements, site research, and deployment.
+Recheck them against the current guard; a historical failing deployment guard
+is not evidence that the current case passes. Record actual current results.
 
-## Attachment eval (agent and skills per request)
-
-`scripts/router_attachment/` holds 57 labeled requests (43 dev, 14 held-out
-phrasings) with the acceptable agents, required skill groups, and forbidden
-picks for each. `run_eval.py` measures `d-prepare` (the Jev evidence alone),
-`d-model` (a model plays the `/d` session: it reads this SKILL.md, `/do`'s rule
-text, and the manifest, then `--finalize` adds the attachments), and `do-model`
-(a model applying `/do` to the manifest).
-`scripts/tests/test_router_attachment_eval.py` replays recorded picks and Jev
-evidence through the attachment policy offline.
-
-Full attach = right agent, every required skill group, no forbidden pick.
-
-| Run | Dev full attach | Dev skill recall / precision | Held-out full attach |
-|---|---|---|---|
-| `/d` v1.1 (d-model, 2026-09-22) | 0.558 | 0.667 / 0.731 | 0.429 |
-| `/do` (do-model, 2026-09-22) | 0.837 | 0.933 / 1.000 | 1.000 |
-| `/d` v1.2 (2026-09-22) | 0.930 | 0.933 / 0.948 | 0.929 |
-| `/d` v1.3 keyword fixes and private gate (2026-09-23) | 0.953 | 0.956 / 0.964 | 1.000 |
-
-| `/d` session pick (d-model, 2 runs, 2026-10-15) | 0.977, 0.977 | 1.000 / 0.969 | 1.000, 1.000 |
-
-The first four rows are the Jev two-stage pick.
-
-## Intent-alignment checks
-- A proposed intent that drops material scope, adds unrequested work, or uses a
-  route that visibly conflicts with the request must return `alignment: review`.
-- The instruction gate must use the receipt produced for the exact runtime
-  `PROPOSED_INTENT`. This is not hook enforcement, so tests must not claim a
-  technical boundary that the implementation does not provide.
-- Every route, including force-route and Trivial, must attempt runtime
-  alignment.
-- Essential ambiguity must return `clarification_needed: true`; routine
-  implementation choices must not.
+## Routing call boundaries and transport checks
+- Prepare collects attachment evidence and the protected guard; the session
+  selects names and complexity. Finalize validates membership and computes the
+  attachment stack without selecting a route through Jev. Every executable
+  route makes a separate fresh actual-intent check through the builder.
+- Test normal, force, trivial, fallback, and injected routes: none may answer
+  or dispatch using baseline/cached/self-reported alignment.
+- Missing or malformed answers, unavailable transport, review, and essential
+  clarification fail closed. Corrected current intent must be rechecked.
+- Reject missing phase evidence, empty task fields, absent Simple+ plans, and
+  inapplicable claims that contradict creation/code/workflow conditions.
+- Exercise `--router-finalize` and native session pending gates, including
+  attempts to omit `router` or use manual Agent/Task dispatch.
 - A 429, 503, 529, or timeout from Vercel retries at most twice and persists a
-  safe receipt; other gateway errors fail open.
-- `auto` prefers Vercel, explicit transport selection never switches, and
+  safe receipt; other gateway errors trigger classification fallback only. Intent validation
+  remains blocked until a fresh aligned response.
+- `auto` prefers direct Jev, explicit transport selection never switches, and
   `direct` sends the same state and questions to the Jev API.
 
 ## Known failure modes
@@ -84,21 +63,18 @@ The first four rows are the Jev two-stage pick.
   Covered by the Vercel bridge retry receipt + `--timeout` flag.
 - Missing Gateway bridge/HTTP-client dependency -> must not crash. Covered:
   `jev-route.py` uses the isolated Vercel bridge; the bridge package is
-  installed by `install.sh`.
-- Confidently-wrong pick on `paraphrase-security`/`false-positive-guard` — no
-  runtime backstop exists for `false-positive-guard` (see
-  `references/jev-classifier-design.md` "Confident-wrong risk"); caught only by
-  the per-bucket `SAFETY_BUCKETS` gate on the full corpus run, not by any
-  single-request check.
-- `/do`'s rule text moves or loses a rule -> `print-route-rules.py` exits 1 or
-  `scripts/tests/test_print_route_rules.py` fails.
+  installed by `install.sh`; missing attachment evidence does not bypass the
+  builder's required actual-intent check.
+- Confidently-wrong classification on `paraphrase-security`/
+  `false-positive-guard` — actual-intent checking adds a runtime judgment but is not ground truth.
+  Keep per-bucket `SAFETY_BUCKETS` evaluation; do not infer correctness from
+  one aligned request.
 
 ## Full-corpus evidence
 
 Do not cite a run unless its verdict exists in the repository and was produced
-from the current corpus, manifest, and implementation. The measurement behind
-the current design is summarized in `references/jev-classifier-design.md`.
-Generate a fresh output directory with the command above when comparative
-routing evidence is needed. Intent alignment is production functionality
-established by repeated use; the corpus remains a regression tool for route
-quality.
+from the current corpus, manifest, and implementation. The previously cited
+2026-09-16 v1/v2 verdict paths are absent, so their historical percentages are
+not part of this maintenance contract. Generate a fresh output directory with
+the command above when comparative routing evidence is needed. The corpus
+remains a regression tool for route quality.

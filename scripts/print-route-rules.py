@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """Print /do's Phase 2 routing rules so /d applies the same text.
 
-The rules live once, in `skills/meta/do/SKILL.md`, from the line
-"**Routing rules (ALL apply):**" up to "**Section validator (before
-dispatch):**". That span holds the section-integrity, FORCE-route,
-pipeline-selection, multi-agent, and specificity rules, the combination
-doctrine, and the Step 0b skill-greediness gate, agent-greediness gate,
-pairing rule, and fallback reason. /d prints it instead of copying it, so the
-two routers cannot drift. `scripts/tests/test_print_route_rules.py` fails when
-either anchor moves.
+The rules live once, in `skills/meta/do/SKILL.md`, between "## 2. SELECT"
+and "## 3. ENHANCE". That span holds manifest membership, domain pairing,
+force-route, pipeline, and composition rules. /d prints it instead of copying
+it, so the two routers cannot drift. `scripts/tests/test_print_route_rules.py`
+fails when either anchor moves.
 
 Usage:
     python3 scripts/print-route-rules.py
@@ -23,8 +20,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-START = "**Routing rules (ALL apply):**"
-END = "**Section validator (before dispatch):**"
+START = "## 2. SELECT"
+END = "## 3. ENHANCE"
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 

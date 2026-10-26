@@ -1,28 +1,9 @@
 #!/usr/bin/env python3
 # hook-version: 4.0.1
-"""
-UserPromptSubmit hook -- pre-run jev-route.py on a /d invocation and inject
-JEV_RESULT before the model generates a single token.
+"""Persist mandatory /d and /do obligations before optional classification.
 
-A skill instruction to "run the route script first" depends on the model
-choosing to comply. This hook runs the script before the model has a choice.
-
-This hook detects a raw ``/d ...`` invocation at UserPromptSubmit (the
-earliest hook point in the turn, before /d's own instructions are read),
-runs ``scripts/jev-route.py`` itself, and injects the resulting JSON as
-additionalContext. JEV_RESULT holds the deterministic part of the route: the
-safety force route (pr-workflow, security) when pre-route.py matches one, the
-Jev attachment evidence, and the project facts. The session model picks the
-agent, skill, and pipeline itself in Phase 1 of skills/meta/d/SKILL.md.
-
-Honest limit, not overclaimed: this is real, mechanical enforcement for a
-detected, on-time /d invocation -- the guard and the Jev attachment call
-happen outside the model's control, deterministically, before generation
-starts. It is NOT 100%% immunity: an invocation shape the regex below does
-not recognize, or a hook failure/timeout, silently falls through to Phase 1's
-own prose-driven script call -- this hook fails open in every failure mode,
-it never blocks the prompt. See docs/injected-context-contracts.md's
-``[jev-route-injector]`` entry for the full contract.
+Classification timeouts never remove the pending obligation. Stop and native
+Agent/Task dispatch are gated separately by router-required-gate.py.
 """
 
 import sys  # vexjoy-pyguard
@@ -47,6 +28,7 @@ if sys.version_info < (3, 10):  # vexjoy-pyguard advisory
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -57,15 +39,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from hook_utils import context_output, empty_output, hook_error
 from stdin_timeout import read_stdin
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+from router_gate import clear_required_router, continue_required_router, get_required_router, set_required_router
+from router_gate import session_id as current_session_id
+
 EVENT_NAME = "UserPromptSubmit"
 
-# Matches a /d invocation at the start of the prompt: "/d", "/d <request>",
-# "/d\n<request>". \b after "d" prevents matching "/do" or "/design" etc.
-DETECT_PATTERN = re.compile(r"^\s*/d\b\s*", re.IGNORECASE)
+DETECT_PATTERN = re.compile(r"^\s*[/\$](do|d)(?=\s|$)\s*", re.IGNORECASE)
+ENVELOPE_PATTERN = re.compile(
+    r"^\s*<command-name>\s*/?(do|d)\s*</command-name>.*?"
+    r"<command-args>(.*?)</command-args>",
+    re.IGNORECASE | re.DOTALL,
+)
 
-# A Vercel attempt gets four seconds. Three attempts plus two maximum
-# Retry-After delays (5s each) take at most 22s, leaving two seconds for Python
-# startup, JSON work, and process teardown under the host's 26s hook timeout.
+
+def extract_router(prompt: str) -> tuple[str, str] | None:
+    match = DETECT_PATTERN.match(prompt)
+    if match:
+        return match.group(1).lower(), prompt[match.end() :].strip()
+    match = ENVELOPE_PATTERN.match(prompt)
+    if match:
+        return match.group(1).lower(), match.group(2).strip()
+    return None
+
+
+# Bound gateway retries within the host's 26-second hook timeout.
 JEV_ROUTE_ATTEMPT_TIMEOUT_SECONDS = 4
 JEV_ROUTE_TIMEOUT_SECONDS = 24
 
@@ -96,19 +94,17 @@ def extract_prompt(event: dict) -> str:
 
 
 def extract_request_text(prompt: str) -> str | None:
-    """Return the request text after ``/d``, or None if not a /d invocation."""
-    m = DETECT_PATTERN.match(prompt)
-    if not m:
-        return None
-    return prompt[m.end() :].strip()
+    """Return router arguments, or None for a nonrouter prompt."""
+    invocation = extract_router(prompt)
+    return invocation[1] if invocation else None
 
 
 def run_jev_route(request_text: str, session_id: str = "", cwd: str = "") -> dict | None:
     """Run jev-route.py directly (list-argv subprocess -- no shell, so no
     quoting risk from ``request_text``, which travels in a temp file).
 
-    Returns the parsed JEV_RESULT dict, or None on any failure -- every
-    failure path here means "fail open," not "block."
+    Returns a parsed JEV_RESULT or None on classification failure. The
+    separately persisted mandatory validation obligation remains pending.
 
     ``session_id`` reaches the call log through ``JEV_SESSION_ID``, so spend can
     be read per session. ``cwd`` is the repository the request is about; the
@@ -165,10 +161,11 @@ def build_injection(jev_result: dict) -> str:
         "[jev-route-injector] JEV_RESULT precomputed by this hook before your first token this "
         "turn -- do NOT run scripts/jev-route.py again for this request; skills/meta/d/SKILL.md "
         "Phase 1 gates on this being present. It holds the safety force route, the attachment evidence, "
-        "and the project facts. It does NOT pick the agent, skill, or pipeline: you pick them in Phase 1 "
-        "with the /do rules, then run scripts/jev-route.py --finalize. Phase 2 still requires you to write "
-        "PROPOSED_INTENT and run scripts/jev-intent-align.py on that text before any routing banner or "
-        "dispatch. JEV_RESULT = "
+        "and the project facts for Phase 1 preparation. It does NOT pick the agent, skill, or pipeline: "
+        "you pick them in Phase 2 with the /do rules, then run scripts/jev-route.py --finalize. "
+        "Phase 5 requires task_spec.intent and fresh intent validation through scripts/build-dispatch.py "
+        "before any routing banner, dispatch, or answer; direct trivial handling uses --router-finalize. "
+        "JEV_RESULT = "
         f"{json.dumps(jev_result)}"
     )
 
@@ -200,26 +197,58 @@ def main() -> None:
         empty_output(EVENT_NAME).print_and_exit()
         return
 
-    request_text = extract_request_text(prompt)
-    if request_text is None or not request_text:
-        # Not a /d invocation, or /d with no request text to classify.
-        empty_output(EVENT_NAME).print_and_exit()
+    session = event.get("session_id") or current_session_id()
+    invocation = extract_router(prompt)
+    continuation = False
+    if invocation is None:
+        marker = get_required_router(session) if session else None
+        if marker and marker.get("status") != "completed":
+            continue_required_router(session, prompt)
+            invocation = (marker["router"], prompt)
+            continuation = True
+        else:
+            if session:
+                clear_required_router(session)
+            empty_output(EVENT_NAME).print_and_exit()
+            return
+    if not isinstance(session, str) or not session:
+        print(
+            json.dumps(
+                {"decision": "block", "reason": "Router requires a session ID to enforce mandatory intent checks."}
+            )
+        )
         return
-
-    session_id = event.get("session_id") if isinstance(event, dict) else ""
-    cwd = event.get("cwd")
-    jev_result = run_jev_route(
-        request_text,
-        session_id if isinstance(session_id, str) else "",
-        cwd if isinstance(cwd, str) else "",
+    router, request_text = invocation
+    # Persist before a subprocess can time out, crash, or return a fallback.
+    if not continuation:
+        set_required_router(session, router, prompt)
+    mandatory = (
+        f"[router-required] /{router}: ALL skill phases are mandatory. "
+        "Before dispatch or a final answer, restate the requested outcome and constraints, "
+        "then run scripts/build-dispatch.py with router, request_verbatim unchanged, "
+        "and task_spec.intent. It runs the actual proposed-intent Jev check. "
+        "Use --router-finalize for direct/trivial answers. A baseline classification is "
+        "NOT intent validation. Fallback, timeout, trivial, and force routes cannot skip it. "
+        f"Use JEV_SESSION_ID={shlex.quote(session)} for router commands."
     )
-    if jev_result is None:
-        # Fail open: Phase 1's own prose-driven script call is the fallback,
-        # unchanged from before this hook existed.
-        empty_output(EVENT_NAME).print_and_exit()
-        return
-
-    context_output(EVENT_NAME, build_injection(jev_result)).print_and_exit()
+    if continuation:
+        mandatory += (
+            " This is a continuation of an unfinished router task. Preserve its original outcome; "
+            "include every prior pending user request verbatim in task_spec.prior_context, "
+            "and use this latest message unchanged as request_verbatim. Reclassify with that context; "
+            "the prior route receipt does not cover this new turn."
+        )
+    cwd = event.get("cwd")
+    result = (
+        run_jev_route(request_text, session, cwd if isinstance(cwd, str) else "")
+        if router == "d" and request_text and not continuation
+        else None
+    )
+    if result is not None:
+        mandatory += "\n" + build_injection(result)
+    elif router == "d" and not continuation:
+        mandatory += "\nClassification unavailable: run /do routing; the intent obligation remains pending."
+    context_output(EVENT_NAME, mandatory).print_and_exit()
 
 
 if __name__ == "__main__":
@@ -227,5 +256,13 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         hook_error("jev-route-injector-userprompt", exc)
+        print(
+            json.dumps(
+                {
+                    "decision": "block",
+                    "reason": "Mandatory router state could not be recorded; repair the hook before continuing.",
+                }
+            )
+        )
     finally:
         sys.exit(0)

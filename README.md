@@ -9,7 +9,7 @@ VexJoy Agent connects plain-English requests to specialist agents, skills, and w
 The aim is to give capable models useful domain knowledge without making you learn the toolkit's catalog.
 
 <!-- Counts here must match the Four Layers table (~line 143). Verify both: python3 scripts/validate-doc-counts.py -->
-44 agents, 63 skills, 79 hooks, 157 scripts. Agents carry domain knowledge, skills provide reusable methods, hooks enforce selected checks, and scripts handle repeatable plumbing.
+44 agents, 63 skills, 80 hooks, 159 scripts. Agents carry domain knowledge, skills provide reusable methods, hooks enforce selected checks, and scripts handle repeatable plumbing.
 
 Works across Claude Code (`/do`), Codex (`$do`), Factory (`/do`), Reasonix (`/do`).
 
@@ -43,35 +43,50 @@ The router pairs a Go agent with a debugging skill, then follows the task throug
 
 ## /d — Jev-Powered Router
 
-`/d` requires [TypeSafe's Jev](https://docs.typesafe.ai). Jev classifies the
-request, checks that the selected route preserves the requested outcome, and
-then dispatches the agent, skill, and pipeline.
-
-Intent preservation is production behavior: `/d` restates the requested
-outcome and gates dispatch on a Jev receipt for that exact proposed intent,
-preventing an agent from quietly expanding an apple into an orchard.
+`/d` uses [TypeSafe's Jev](https://docs.typesafe.ai) to classify the request
+and select the matched agent, skill, and pipeline. Classification failures
+fall back to `/do` selection; they do not bypass the required intent check.
 
 Choose either transport:
 
 ```bash
-# Preferred: Jev through Vercel AI Gateway
+# Alternative: Jev through Vercel AI Gateway
 export JEV_TRANSPORT=vercel
 export AI_GATEWAY_API_KEY=...
 
-# Alternative: Jev's direct API
+# Preferred: Jev's direct API
 export JEV_TRANSPORT=direct
 export TYPESAFE_API_KEY=...
+
+# Bill the direct API through OpenRouter instead of TypeSafe
+export TYPESAFE_BASE_URL=https://openrouter.ai/api
+export TYPESAFE_API_KEY=sk-or-v1-...
+export JEV_KEY_ONLY=1
 ```
 
-`JEV_TRANSPORT=auto` is the default. It prefers Vercel when
-`AI_GATEWAY_API_KEY` is set, then uses the direct API when only
-`TYPESAFE_API_KEY` is set. An explicit transport never silently switches to
+`TYPESAFE_BASE_URL` points the direct transport at any host serving the same
+System One wire format at `/v1/systemone`; OpenRouter does. It does not affect
+the Vercel transport, which reaches Jev through the AI SDK gateway provider
+rather than a URL. Set `JEV_KEY_ONLY=1` with OpenRouter so the scripts that
+gate on the `typesafe@typesafe-ai` plugin accept a key alone.
+
+`JEV_TRANSPORT=auto` is the default. It prefers the direct API when
+`TYPESAFE_API_KEY` is set, then uses Vercel when only
+`AI_GATEWAY_API_KEY` is set. An explicit transport never silently switches to
 the other one. The TypeSafe MCP plugin is not required for `/d`.
 
-Intent-alignment judgments are recorded in `learning.db` without raw request
-text. Receipts keep the Jev judge model separate from the executing agent's
-configured model and effort level. View proposed-intent difference rates by
-agent profile, judge model, and transport:
+Both `/d` and `/do` require every applicable routing phase and a fresh Jev check
+of the actual proposed intent before dispatch or direct completion. Trivial,
+force, fallback, and injected-result routes use the same gate. Missing evidence
+or unavailable, errored, or unaligned intent results block execution; the agent
+reports the diagnostic and resolves it before continuing. The shared builder
+validates handoffs, while installed hooks enforce supported dispatch/completion
+boundaries. Clarifications to unfinished routed tasks retain the intent gate
+and require a fresh check with the original request context. Claude also blocks
+completion while checked worker prompts remain undispatched; Codex cannot
+observe native worker dispatch and has a narrower completion guard. See the [required router protocol](skills/meta/d/references/required-router-protocol.md).
+
+Intent-alignment receipts remain in `learning.db`. Inspect them with:
 
 ```bash
 python3 scripts/jev-intent-stats.py --days 30
@@ -82,11 +97,7 @@ Example:
 ```
 > /d fix the flaky test in the payments module
 
-  Intent alignment (/d):
-    -> Restated outcome: Fix the flaky payments test without changing unrelated behavior.
-    -> Jev: aligned
-
-  ROUTING (/d): testing-automation-engineer + testing-preferred-patterns
+  ROUTING (/d): testing-automation-engineer + testing
   Source: jev (confidence: medium)
   Invoking...
 ```
@@ -175,7 +186,7 @@ Mirrors agents (as "droids"), skills, and hooks into `~/.factory/`. Hook config 
 <details>
 <summary><b>Reasonix Support</b></summary>
 
-Mirrors skills, 157 scripts, and 10 allowlisted hook registrations into `~/.reasonix/`. Reasonix has no agent or custom-command surface; `/do` arrives as a skill. It exposes four events: PreToolUse, PostToolUse, UserPromptSubmit, and Stop. MCP, model, and permissions in `~/.reasonix/config.json` remain user-owned.
+Mirrors skills, 159 scripts, and 10 allowlisted hook registrations into `~/.reasonix/`. Reasonix has no agent or custom-command surface; `/do` arrives as a skill. It exposes four events: PreToolUse, PostToolUse, UserPromptSubmit, and Stop. MCP, model, and permissions in `~/.reasonix/config.json` remain user-owned.
 
 </details>
 
@@ -200,8 +211,8 @@ Strips built-in tool-use instructions. The toolkit's agents, skills, hooks, and 
 |---|---|---|
 | Agents | 44 | Domain knowledge: idiom tables, failure mode catalogs, error-to-fix mappings |
 | Skills | 63 | Reusable guidance and methodology for recurring work. |
-| Hooks | 79 | Lifecycle checks, context injection, and telemetry. |
-| Scripts | 157 | Repeatable validation, orchestration, and plumbing. |
+| Hooks | 80 | Lifecycle checks, context injection, and telemetry. |
+| Scripts | 159 | Repeatable validation, orchestration, and plumbing. |
 
 Full skill catalog: [docs/skills.md](docs/skills.md).
 
@@ -254,7 +265,7 @@ One report-only script surfaces upkeep work; it prints a digest and never edits,
 
 - `python3 scripts/stale-skill-scan.py --top 20` ranks stale skills and agents as pruning candidates. Run it quarterly; see [docs/deprecation-template.md](docs/deprecation-template.md).
 
-Scheduled work follows the same boundary as everything else: judgment uses models; repeatable plumbing uses 157 scripts.
+Scheduled work follows the same boundary as everything else: judgment uses models; repeatable plumbing uses 159 scripts.
 
 | Need | Use |
 |---|---|

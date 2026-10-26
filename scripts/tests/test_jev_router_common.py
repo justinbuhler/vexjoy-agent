@@ -784,7 +784,7 @@ class TestRedirectRefused:
         threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in (target, redirector)]
         for t in threads:
             t.start()
-        monkeypatch.setattr(common, "TYPESAFE_URL", f"http://127.0.0.1:{redirector.server_port}/v1/systemone")
+        monkeypatch.setenv("TYPESAFE_BASE_URL", f"http://127.0.0.1:{redirector.server_port}")
         try:
             payload = {
                 "model": "m",
@@ -824,3 +824,25 @@ class TestValidatedCallFailsClosed:
         data = {"answers": {"q": {"noul": 0.4}, "c": {"choice": "a", "probabilities": {"a": 1.0}}}}
         monkeypatch.setattr(common, "call_jev", lambda *_a, **_k: (data, 2.0))
         assert common.validated_call_jev({}, "k", 5) == (data, 2.0)
+
+
+class TestTypesafeUrl:
+    """``TYPESAFE_BASE_URL`` redirects the direct transport to an API-compatible host."""
+
+    def test_defaults_to_typesafe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unset base URL keeps TypeSafe's own endpoint."""
+        monkeypatch.delenv("TYPESAFE_BASE_URL", raising=False)
+        assert common.typesafe_url() == "https://api.typesafe.ai/v1/systemone"
+
+    @pytest.mark.parametrize(
+        "base", ["https://openrouter.ai/api", "https://openrouter.ai/api/", "  https://openrouter.ai/api  "]
+    )
+    def test_openrouter_base_is_normalized(self, monkeypatch: pytest.MonkeyPatch, base: str) -> None:
+        """Trailing slashes and surrounding whitespace never double the path separator."""
+        monkeypatch.setenv("TYPESAFE_BASE_URL", base)
+        assert common.typesafe_url() == "https://openrouter.ai/api/v1/systemone"
+
+    def test_resolved_per_call_not_at_import(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """jev_transport loads ~/.env after importing this module, so the read must be late."""
+        monkeypatch.setenv("TYPESAFE_BASE_URL", "https://example.test")
+        assert common.typesafe_url() == "https://example.test/v1/systemone"

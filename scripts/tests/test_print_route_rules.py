@@ -21,18 +21,20 @@ spec.loader.exec_module(rules)
 
 DO_SKILL = REPO / "skills" / "meta" / "do" / "SKILL.md"
 
-# Every rule /d's pick depends on: Step 0 rules and the Step 0b gates.
+# Semantic obligations shared by both routers, independent of old rule labels.
 REQUIRED_RULES = (
-    "SECTION-INTEGRITY RULE",
-    "FORCE-ROUTE RULE",
-    "PIPELINE-SELECTION RULE",
-    "MULTI-AGENT RULE",
-    "SPECIFICITY RULES",
+    "Validate\nagents in `AGENTS`, skills in `SKILLS`, pipelines in `PIPELINES`",
+    "Inspect the narrowest domain agents and near-matches",
+    "A domain skill requires its matching domain agent",
+    "Evaluate semantic FORCE rules",
+    "the most specific intent match",
+    "High-confidence protected git/security force routes override",
+    "Keep stacks returned for protected language/domain",
     "COMBINATION DOCTRINE",
-    "Skill-greediness gate",
-    "Agent-greediness gate",
-    "Pairing rule",
-    "Fallback reason",
+    "Simple+ requires agent+methodology skill",
+    "Select debugging/refactoring pipelines when applicable",
+    "Each\nfan-out has distinct ownership",
+    "Record any general-purpose\nreason",
 )
 
 

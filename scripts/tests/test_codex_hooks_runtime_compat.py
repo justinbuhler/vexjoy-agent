@@ -120,6 +120,7 @@ def _semantic_contracts() -> dict[tuple[str, str], str]:
     add("SubagentStop", "noaction:herdr-absent", "herdr-state-reporter.py")
     add("SubagentStop", "state:subagent-registry", "subagent-state-tracker.py")
     add("SubagentStop", "state:task-registry", "session-task-registry.py")
+    add("Stop", "noaction:no-router-obligation", "router-required-gate.py")
     add("Stop", "state:learning-db", "session-summary.py")
     add("Stop", "deny:Toolkit drift detected", "stop-drift-guard.py")
     add("Stop", "context:[rules-distill]", "rules-distill-trigger.py")

@@ -18,6 +18,7 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
 _extract_written_paths = mod._extract_written_paths
+_resolve_path = mod._resolve_path
 
 
 # ---------------------------------------------------------------------------
@@ -74,3 +75,50 @@ class TestExtractWrittenPathsNegative:
     def test_echo_without_redirect(self):
         paths = _extract_written_paths("echo hello world")
         assert paths == []
+
+
+# ---------------------------------------------------------------------------
+# _resolve_path
+# ---------------------------------------------------------------------------
+
+
+class TestResolvePath:
+    def test_absolute_path(self):
+        """An absolute path is resolved in place, never joined onto cwd."""
+        result = _resolve_path("/home/user/file.md")
+        assert result is not None
+        # Compare against the same resolution: macOS reaches /home through a
+        # firmlink, so the literal path is not what resolve() returns there.
+        assert result == Path("/home/user/file.md").resolve()
+        assert not result.is_relative_to(Path.cwd())
+
+    def test_relative_path(self):
+        result = _resolve_path("agents/test.md")
+        assert result is not None
+        assert result.is_absolute()
+        # Should be cwd / agents/test.md
+        assert str(result).endswith("agents/test.md")
+
+    def test_home_expansion(self):
+        result = _resolve_path("~/file.md")
+        assert result is not None
+        assert result.is_absolute()
+        assert "~" not in str(result)
+
+    def test_empty_string(self):
+        """Empty string should still resolve (to cwd)."""
+        result = _resolve_path("")
+        # Path("").expanduser() may raise or resolve to cwd
+        # The function returns Path | None, either is acceptable
+        assert result is None or isinstance(result, Path)
+
+    def test_dot_path(self):
+        result = _resolve_path(".")
+        assert result is not None
+        assert result.is_absolute()
+
+    def test_dotdot_path(self):
+        result = _resolve_path("../file.md")
+        assert result is not None
+        assert result.is_absolute()
+        assert ".." not in str(result)

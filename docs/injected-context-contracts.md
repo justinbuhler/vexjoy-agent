@@ -57,11 +57,57 @@ Source: `hooks/precompact-archive.py` (PreCompact).
 Meaning: A pipeline session with an active ADR is about to lose context to compression. The block carries the ADR path, its hash, and the three commands that restore your bearings afterwards.
 Action: After compaction, run the listed commands in order: read the ADR, verify its hash with `adr-query.py verify`, then reload your role context with `adr-query.py context`. The ADR stays binding across the compaction boundary.
 
+### `[router-required] /d|/do: ALL skill phases are mandatory...`
+
+Source: `hooks/jev-route-injector-userprompt.py` (UserPromptSubmit; recognizes
+raw `/d`, `$d`, `/do`, and `$do` invocations before generation starts).
+Meaning: A session-bound obligation was recorded for the unchanged latest
+request before classification. All ordered router phases and the fresh check
+of the agent's actual proposed intent must run, including trivial, force,
+fallback, and injected-result paths. Missing session identity or failure to
+record the obligation blocks the invocation.
+Action: Follow the selected router skill and
+`skills/meta/d/references/required-router-protocol.md`. Pass the instructed
+`JEV_SESSION_ID`, matching `router`, unchanged `task_spec.request_verbatim`,
+actual `task_spec.intent`, and required phase/gate evidence to
+`build-dispatch.py`. Direct Trivial handling uses `--router-finalize`.
+Baseline classification and cached or self-reported alignment never satisfy
+this gate. A failed alignment permits reporting its diagnostic, not task
+execution or a success claim.
+
+`hooks/router-required-gate.py` guards native Agent/Task prompts where the
+harness exposes them to PreToolUse, and guards Stop in supported installations.
+A native worker receives the exact validated builder output once; added or
+reused prompts are rejected. Codex does not currently expose native agent
+calls to PreToolUse, so its builder and Stop gate enforce the supported
+boundaries. This is not universal shell-command interception.
+Claude's Stop gate rejects `dispatch_ready` while any checked worker prompt is
+still queued; all queued prompts must be consumed. Codex's adapter explicitly
+allows Stop with validated queued prompts because it cannot observe native
+dispatch; this does not establish execution or completion of the work.
+
+An unprefixed follow-up while the task is pending, `checked_blocked`,
+`dispatch_ready`, `validated`, or `dispatched` re-arms the same router with a new request generation and
+invalidates prior approvals. Preserve the original outcome: put the latest
+message unchanged in `request_verbatim`, supply prior pending user messages
+verbatim in `prior_context`, and reclassify using that context. The builder
+checks that required earlier request hashes are represented. The hook does not
+classify a bare clarification fragment in isolation. A successful Stop marks
+the matching generation `completed`; only then does an ordinary later prompt
+clear the marker. A stale Stop cannot complete a newer generation.
+
 ### `[jev-route-injector] JEV_RESULT precomputed by this hook...` (plus the full JEV_RESULT JSON)
 
-Source: `hooks/jev-route-injector-userprompt.py` (UserPromptSubmit; fires only on a raw `/d ...` prompt, matched before generation starts).
-Meaning: `scripts/jev-route.py` already ran for this turn's request and its output is the `JEV_RESULT` JSON embedded in the tag. It holds the safety force route (`pr-workflow`, `pr-pipeline`, `security`) when `pre-route.py` matches one, the Jev attachment evidence (stack signals and domain scores), and the project facts. It does not pick the agent, skill, or pipeline: the session model picks them with `/do`'s rule text. This exists because prose alone ("call jev-route.py first") failed once — the model skipped the script call on a meta-question. The hook makes the guard and the Jev call happen outside the model's control, before the model's first token for the turn.
-Action: `skills/meta/d/SKILL.md` Phase 1 reads this `JEV_RESULT` directly and does NOT re-run `scripts/jev-route.py`. Then pick the route, run `jev-route.py --finalize`, and complete Phase 2 (`PROPOSED_INTENT` and `jev-intent-align.py`) before any banner or dispatch. When this tag is absent (non-`/d` prompt, an invocation shape the hook's regex didn't recognize, or a hook timeout/failure — the hook fails open in every error case), Phase 1 runs the script itself exactly as before this hook existed; absence is not an error condition, it is the documented fallback path.
+Source: The same UserPromptSubmit hook, for `/d` and `$d` only.
+Meaning: `scripts/jev-route.py` already prepared attachment evidence and the
+protected force route for this request. The session selects the agent, skill,
+and pipeline from the complete rules and manifest; Jev does not select them.
+Action: `/d` Phase 1 consumes this receipt instead of repeating preparation.
+If no receipt was injected, run Phase 1's preparation command. Phase 2 uses
+`--finalize` to validate the session's selection and compute attachments.
+The separately recorded intent obligation remains pending despite preparation
+timeout or error. Neither absence of `JEV_RESULT` nor a finalized route permits
+skipping the fresh builder intent check.
 
 ## Session-State Tags (injected at session start, shape behavior for the session)
 

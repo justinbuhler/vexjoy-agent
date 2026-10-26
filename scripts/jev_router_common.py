@@ -326,7 +326,8 @@ def _count_call(
 
 
 TYPESAFE_PLUGIN_KEY = "typesafe@typesafe-ai"
-TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
+TYPESAFE_BASE_URL = "https://api.typesafe.ai"
+TYPESAFE_URL = f"{TYPESAFE_BASE_URL}/v1/systemone"
 JEV_MODEL = "jev-1.14.0"  # pinned 2026-10-16 (owner); gateway pins typesafe-ai/jev-1.14.0
 
 
@@ -343,6 +344,17 @@ _OPENER = urllib.request.build_opener(_NoRedirect)
 def _open_url(request: urllib.request.Request, timeout: float):
     """Open one request on the pinned endpoint without following redirects."""
     return _OPENER.open(request, timeout=timeout)
+
+
+def typesafe_url() -> str:
+    """Return the System One endpoint, honoring ``TYPESAFE_BASE_URL``.
+
+    Resolved per call, not at import: ``jev_transport`` loads ``~/.env`` after
+    importing this module, so an import-time read would miss the file. Set the
+    base to ``https://openrouter.ai/api`` to bill Jev through OpenRouter, which
+    serves the same wire format at ``/v1/systemone``.
+    """
+    return os.environ.get("TYPESAFE_BASE_URL", TYPESAFE_BASE_URL).strip().rstrip("/") + "/v1/systemone"
 
 
 def _read_json_object(path: Path) -> dict:
@@ -612,7 +624,7 @@ def call_jev(
     else:
         body = json.dumps(payload).encode("utf-8")
     headers.update(extra_headers or {})
-    request = urllib.request.Request(TYPESAFE_URL, data=body, method="POST", headers=headers)
+    request = urllib.request.Request(typesafe_url(), data=body, method="POST", headers=headers)
     start = time.monotonic()
     attempt = 0
     try:

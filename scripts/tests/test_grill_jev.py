@@ -134,8 +134,12 @@ def test_fallback_battery_is_valid() -> None:
 
 
 def test_choice_report_choices_must_name_real_options() -> None:
-    q = {"type": "choice", "report_choices": ["systemic"], "instructions": {"question": "?"},
-         "criteria": {"low": {"what": "a"}, "critical": {"what": "b"}}}
+    q = {
+        "type": "choice",
+        "report_choices": ["systemic"],
+        "instructions": {"question": "?"},
+        "criteria": {"low": {"what": "a"}, "critical": {"what": "b"}},
+    }
     assert _load_module()._battery_problems({"x": q})
 
 

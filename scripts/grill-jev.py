@@ -139,7 +139,9 @@ def _battery_problems(questions: dict[str, Any]) -> list[str]:
         elif qtype == "choice" and not (isinstance(criteria, dict) and criteria):
             problems.append(f"{qid}: choice criteria must map each option to {{what, not_for, examples}}")
         elif qtype == "choice" and not (
-            isinstance(q.get("report_choices"), list) and q["report_choices"] and set(q["report_choices"]) <= set(criteria)
+            isinstance(q.get("report_choices"), list)
+            and q["report_choices"]
+            and set(q["report_choices"]) <= set(criteria)
         ):
             problems.append(f"{qid}: choice needs report_choices, a non-empty subset of its criteria options")
     return problems

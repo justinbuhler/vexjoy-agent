@@ -32,12 +32,12 @@ SESSION_READS_FILE = mod.SESSION_READS_FILE
 # ---------------------------------------------------------------------------
 
 
-
 @pytest.fixture(autouse=True)
 def _no_project_dir(monkeypatch):
     """Tests use cwd as the project root; never the real $CLAUDE_PROJECT_DIR."""
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     monkeypatch.delenv("CLAUDE_SESSION_READS_DIR", raising=False)
+
 
 def run_hook(event: dict) -> tuple[str, str, int]:
     """Run the hook with given event and return (stdout, stderr, exit_code)."""

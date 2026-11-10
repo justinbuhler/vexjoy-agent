@@ -615,3 +615,13 @@ class TestCwdExtraction:
 
     def test_default_cwd_used(self):
         assert mod._extract_effective_cwd("git commit -m x", "/fallback") == "/fallback"
+
+    def test_home_and_variable_paths_are_expanded(self, monkeypatch):
+        monkeypatch.setenv("HOME", "/home/u")
+        monkeypatch.setenv("WORK", "/srv/work")
+        assert mod._extract_effective_cwd("cd ~/repo; git commit -m x", "/session") == "/home/u/repo"
+        assert mod._extract_effective_cwd("git -C $WORK/repo commit -m x", "/session") == "/srv/work/repo"
+
+    def test_relative_path_resolves_against_the_session_cwd(self):
+        assert mod._extract_effective_cwd("cd sub && git commit -m x", "/session") == "/session/sub"
+        assert mod._extract_effective_cwd("cd sub && git commit -m x", None) == "sub"

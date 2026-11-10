@@ -105,6 +105,7 @@ from hook_utils import (
     context_output,
     deny_tool_use,
     empty_output,
+    expand_command_path,
     has_reviewable_content,
     hook_error,
     working_tree_diff,
@@ -157,23 +158,11 @@ def _extract_effective_cwd(command: str, default_cwd: str | None) -> str | None:
     if m:
         p = (m.group(1) or m.group(2) or "").strip()
         if p:
-            return _expand_path(p, default_cwd)
+            return expand_command_path(p, default_cwd)
     m = re.search(r'\bgit\s+-C\s+(?:"([^"]+)"|(\S+))', command)
     if m:
-        return _expand_path(m.group(1) or m.group(2), default_cwd)
+        return expand_command_path(m.group(1) or m.group(2), default_cwd)
     return default_cwd
-
-
-def _expand_path(path: str, default_cwd: str | None) -> str:
-    """Expand `~` and `$VAR` as the shell does, and resolve a relative path against the session cwd.
-
-    Without this, `cd ~/repo && git commit` gave the scanner a cwd that does not exist, so the commit
-    went through unscanned.
-    """
-    path = os.path.expanduser(os.path.expandvars(path))
-    if os.path.isabs(path) or not default_cwd:
-        return path
-    return os.path.join(default_cwd, path)
 
 
 def _run_scanner(cwd: str | None, staged: bool = True) -> dict | None:

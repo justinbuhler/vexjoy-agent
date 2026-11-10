@@ -284,6 +284,16 @@ def get_project_dir() -> Path:
     return Path(os.environ.get("CLAUDE_PROJECT_DIR", ".")).resolve()
 
 
+def expand_command_path(path: str, default_cwd: str | None) -> str:
+    """Expand `~` and `$VAR` in a `cd` or `git -C` target as the shell does; resolve a relative path against
+    the session cwd. Without this, `cd ~/repo && git commit` names a folder that does not exist, and a gate
+    that runs git there fails open."""
+    path = os.path.expanduser(os.path.expandvars(path))
+    if os.path.isabs(path) or not default_cwd:
+        return path
+    return os.path.join(default_cwd, path)
+
+
 def session_reads_path() -> Path:
     """Session-reads log: <project>/.claude/session-reads.txt by default.
 

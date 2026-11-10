@@ -48,7 +48,7 @@ import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
-from hook_utils import deny_tool_use, get_tool_input, hook_error, record_governance
+from hook_utils import deny_tool_use, expand_command_path, get_tool_input, hook_error, record_governance
 from stdin_timeout import read_stdin
 
 _BYPASS_ENV = "BRANCH_SAFETY_BYPASS"
@@ -69,12 +69,12 @@ def _extract_effective_cwd(command: str, default_cwd: str | None) -> str | None:
     if m:
         p = (m.group(1) or m.group(2) or "").strip()
         if p:
-            return p
+            return expand_command_path(p, default_cwd)
 
     # Pattern 2: git -C <path>
     m = re.search(r'\bgit\s+-C\s+(?:"([^"]+)"|(\S+))', command)
     if m:
-        return m.group(1) or m.group(2)
+        return expand_command_path(m.group(1) or m.group(2), default_cwd)
 
     return default_cwd
 

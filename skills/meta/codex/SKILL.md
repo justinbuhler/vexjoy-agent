@@ -23,7 +23,7 @@ routing:
 
 Run a benchmark-selected GPT-5.6 task through the Codex CLI (`codex exec`) and return the result. This is the OpenAI execution lane — the general-purpose lane for work the model-selection policy sends to GPT-5.6, and the **canonical owner of general `codex exec` mechanics** — when the CLI changes, update here first. GPT selections are reachable only through this CLI; the Agent tool's `model` parameter covers Claude models only.
 
-**Under Claude Code, this skill runs only on explicit invocation or cross-provider escalation, never as the automatic default.** The harness-native model lane under Claude Code is the Anthropic lane (Opus 5). This skill is a deliberate cross-provider tool — codex review as a second-opinion, codex exec for a GPT-specific constraint — not a routing default.
+**Under Claude Code, this skill runs only on explicit invocation or cross-provider escalation, never as the automatic default.** The harness-native model lane under Claude Code is the Anthropic lane (Opus 5.5 by default; `/do` Model choice). This skill is a deliberate cross-provider tool — codex review as a second-opinion, codex exec for a GPT-specific constraint — not a routing default.
 
 Two flows keep their own specialized codex integration — route to them instead of re-implementing here:
 
@@ -32,7 +32,7 @@ Two flows keep their own specialized codex integration — route to them instead
 
 ## Phase 1: DECIDE — does this task belong on GPT-5.6?
 
-Policy mirror — canonical copy: `/do` SKILL.md, Model Selection (edit there first, then here). Rankings, higher = better; cost = avg USD per task, written as a plain number (slash-command templating corrupts dollar-digit sequences in injected skill bodies), what the owner actually pays.
+Policy mirror — canonical copy: `skills/meta/do/references/model-selection.md` (edit there first, then here). Rankings, higher = better; cost = avg USD per task, written as a plain number (slash-command templating corrupts dollar-digit sequences in injected skill bodies), what the owner actually pays.
 
 | Task class | Model / effort | DeepSWE Pass@1 / cost / output tokens / steps |
 |---|---|---|
@@ -41,7 +41,7 @@ Policy mirror — canonical copy: `/do` SKILL.md, Model Selection (edit there fi
 | High-risk implementation or review | `gpt-5.6-sol` / `xhigh` | 71 / 4.70 / 41k / 44 |
 | Exceptional explicit escalation | `gpt-5.6-sol` / `max` | 73 / 8.39 / 60k / 61 |
 
-Run deterministic work as scripts, not through Codex. The `/do` model policy selects the lane and passes model plus effort. Legacy GPT-5.5, all Luna choices, and the other non-default GPT-5.6 settings are manual-only; do not substitute them automatically. Luna `max`, for example, saves 0.44 USD versus Sol `high` but consumes 45k more output tokens and 65 more steps for two fewer Pass@1 points. Consult the canonical table in `/do` SKILL.md.
+Run deterministic work as scripts, not through Codex. The `/do` model policy selects the lane and passes model plus effort. Legacy GPT-5.5, all Luna choices, and the other non-default GPT-5.6 settings are manual-only; do not substitute them automatically. Luna `max`, for example, saves 0.44 USD versus Sol `high` but consumes 45k more output tokens and 65 more steps for two fewer Pass@1 points. Consult the canonical table in `skills/meta/do/references/model-selection.md`.
 
 These are defaults, not limits. Standing permission to escalate when output misses the bar applies within the policy; `max` still needs an explicit override. For anything that ships, intelligence > taste > cost; cost is a tie-breaker only.
 
@@ -51,13 +51,13 @@ These are defaults, not limits. Standing permission to escalate when output miss
 
 **Wrapper symmetry**: the wrapper is needed for whichever model family is NOT the current harness.
 
-- **Under Claude Code** (current default): GPT-5.6 runs through a wrapper — either the dispatched agent runs `codex exec` via Bash with a self-contained prompt, or a thin Claude wrapper agent (`model: "sonnet"`, low effort) writes the self-contained codex prompt, runs it, and returns the result.
+- **Under Claude Code** (current default): GPT-5.6 runs through a wrapper — either the dispatched agent runs `codex exec` via Bash with a self-contained prompt, or a thin Claude wrapper agent (`model: "opus"`) writes the self-contained codex prompt, runs it, and returns the result.
 - **Under the Codex harness**: Claude models require the wrapper instead.
 - Claude models under Claude Code need no wrapper — just the Agent/Workflow `model` parameter.
 
 Pick the direct-Bash form when the calling agent already holds the task context; pick the thin wrapper agent for fan-out (one wrapper per data source) so the orchestrator stays lean.
 
-**Availability check first**: `command -v codex` — when absent, fall back to the policy's Claude pick (`model: "sonnet"` for mechanical work) and tell the user in one line which lane ran.
+**Availability check first**: `command -v codex` — when absent, fall back to the policy's Claude pick (`model: "opus"` for code work) and tell the user in one line which lane ran.
 
 ## Phase 3: PROMPT — write a self-contained prompt
 
@@ -105,7 +105,7 @@ cat "$TMPFILE"
 
 ### `codex: command not found`
 Cause: Codex CLI not installed on this host.
-Solution: fall back to the policy's Claude pick (`model: "sonnet"` for mechanical work) and report which lane ran; install via the owner's codex setup when authorized.
+Solution: fall back to the policy's Claude pick (`model: "opus"` for code work) and report which lane ran; install via the owner's codex setup when authorized.
 
 ### Sandbox error mentioning bwrap / `Failed RTM_NEWADDR`
 Cause: the bwrap sandbox fails in some containerized/VM environments.
@@ -117,4 +117,4 @@ Solution: shorten the prompt (point codex at files instead of embedding content)
 
 ## References
 
-- `/do` SKILL.md, Model Selection — canonical policy table and routing decision rules
+- `skills/meta/do/references/model-selection.md` — canonical policy table and override rules

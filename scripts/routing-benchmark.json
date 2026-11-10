@@ -941,6 +941,63 @@
       "notes": "Safety question about code - 'code safe' trigger with no mechanics guard word must fire"
     },
     {
+      "request": "check the signup form for SQL injection",
+      "expected_agent": null,
+      "expected_skill": "security",
+      "category": "security",
+      "routing_tier": "pre_route_only",
+      "notes": "Vulnerability vocabulary the security INDEX triggers lack; supplemental trigger 'sql injection' must fire"
+    },
+    {
+      "request": "check the comment box for XSS",
+      "expected_agent": null,
+      "expected_skill": "security",
+      "category": "security",
+      "routing_tier": "pre_route_only",
+      "notes": "Vulnerability vocabulary the security INDEX triggers lack; supplemental trigger 'xss' must fire"
+    },
+    {
+      "request": "look for cross-site scripting in the templates",
+      "expected_agent": null,
+      "expected_skill": "security",
+      "category": "security",
+      "routing_tier": "pre_route_only",
+      "notes": "Vulnerability vocabulary the security INDEX triggers lack; supplemental trigger 'cross site scripting' must fire"
+    },
+    {
+      "request": "add CSRF protection to the login form",
+      "expected_agent": null,
+      "expected_skill": "security",
+      "category": "security",
+      "routing_tier": "pre_route_only",
+      "notes": "Vulnerability vocabulary the security INDEX triggers lack; supplemental trigger 'csrf' must fire"
+    },
+    {
+      "request": "scan the repo for leaked secrets",
+      "expected_agent": null,
+      "expected_skill": "security",
+      "category": "security",
+      "routing_tier": "pre_route_only",
+      "notes": "Vulnerability vocabulary the security INDEX triggers lack; supplemental trigger 'leaked secret' must fire"
+    },
+    {
+      "request": "review the auth flow for vulnerabilities",
+      "expected_agent": null,
+      "expected_skill": "security",
+      "category": "security",
+      "routing_tier": "pre_route_only",
+      "notes": "Vulnerability vocabulary the security INDEX triggers lack; supplemental trigger 'for vulnerabilities' must fire"
+    },
+    {
+      "request": "use dependency injection in the service layer",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "security",
+      "notes": "Design pattern, not a vulnerability: only 'sql injection' is a security trigger"
+    },
+    {
       "request": "resume the plan for the schema migration",
       "expected_agent": null,
       "expected_skill": "process",
@@ -1026,12 +1083,12 @@
       }
     },
     {
-      "request": "deploy to dev to test my hermes stack change in a lab before merging to master",
-      "expected_agent": null,
-      "expected_skill": "deploy",
-      "category": "infrastructure",
+      "request": "make a new trailer for road to aew for youtube showing the ladder match and the busaiku knee finish",
+      "expected_agent": "python-general-engineer",
+      "expected_skill": "game-trailer",
+      "category": "content-creation",
       "routing_tier": "candidate",
-      "notes": "Dev-branch deploy intent — routes to dev-branch-deploy for the Hermes/Maia Concourse dev lane."
+      "notes": "Game trailer from the real game (virtual-clock capture, beat-mapped edit) — game-trailer should appear in top-3 candidates; agent from its agent field. Distinct from video-editing (recorded footage)."
     },
     {
       "request": "get API p99 under 200ms using the same load-test dataset on every run",
@@ -1392,6 +1449,14 @@
       "category": "pre-route-deploy",
       "routing_tier": "pre_route_only",
       "notes": "Force-route corpus (adr/deploy.md); moved from scripts/tests/test_pre_route_public_web_deploy.py"
+    },
+    {
+      "request": "deploy my frontend site to netlify",
+      "expected_agent": null,
+      "expected_skill": "deploy",
+      "category": "pre-route-deploy",
+      "routing_tier": "pre_route_only",
+      "notes": "'frontend' names the site, not work on it; the #993 rename had made it a site-work guard word"
     },
     {
       "request": "use my domain knowledge to design the schema",
@@ -1871,6 +1936,33 @@
       "notes": "Idiom overlap; must not force-route to deploy (adr/deploy.md); moved from scripts/tests/test_pre_route_public_web_deploy.py"
     },
     {
+      "request": "redesign the deploy site",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "deploy",
+      "notes": "Site work, not a deploy: 'design'/'redesign' guard the site triggers (#993 had renamed them 'frontend'/'refrontend')"
+    },
+    {
+      "request": "design a new landing page for my domain",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "deploy",
+      "notes": "Site work, not a deploy: 'design'/'redesign' guard the site triggers (#993 had renamed them 'frontend'/'refrontend')"
+    },
+    {
+      "request": "redesign my public site on my domain",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "deploy",
+      "notes": "Site work, not a deploy: 'design'/'redesign' guard the site triggers (#993 had renamed them 'frontend'/'refrontend')"
+    },
+    {
       "request": "rebrand my portfolio site",
       "expected_agent": null,
       "expected_skill": null,
@@ -2032,6 +2124,38 @@
       "notes": "Force-route corpus (adr/pr-create-skill-guard.md); moved from scripts/tests/test_pre_route_pr_workflow.py"
     },
     {
+      "request": "create a pull request against main",
+      "expected_agent": null,
+      "expected_skill": "pr-workflow",
+      "category": "pre-route-pr-workflow",
+      "routing_tier": "pre_route_only",
+      "notes": "PR-creation triggers carry no unigram guard; 'against' guards only push triggers (adr/pr-create-skill-guard.md)"
+    },
+    {
+      "request": "open a PR against the release branch",
+      "expected_agent": null,
+      "expected_skill": "pr-workflow",
+      "category": "pre-route-pr-workflow",
+      "routing_tier": "pre_route_only",
+      "notes": "PR-creation triggers carry no unigram guard; 'against' guards only push triggers (adr/pr-create-skill-guard.md)"
+    },
+    {
+      "request": "git push origin HEAD",
+      "expected_agent": null,
+      "expected_skill": "pr-workflow",
+      "category": "pre-route-pr-workflow",
+      "routing_tier": "pre_route_only",
+      "notes": "'head' guards merge idioms, not push triggers (adr/pr-create-skill-guard.md)"
+    },
+    {
+      "request": "I pushed the fix, now open a PR",
+      "expected_agent": null,
+      "expected_skill": "pr-workflow",
+      "category": "pre-route-pr-workflow",
+      "routing_tier": "pre_route_only",
+      "notes": "PR-creation triggers carry no unigram guard; 'pushed' guards only push triggers (adr/pr-create-skill-guard.md)"
+    },
+    {
       "request": "ship of Theseus",
       "expected_agent": null,
       "expected_skill": null,
@@ -2066,6 +2190,248 @@
       "routing_tier": "pre_route_negative",
       "forbid_force_route_to": "pr-workflow",
       "notes": "Idiom overlap; must not force-route to pr-workflow (adr/pr-create-skill-guard.md); moved from scripts/tests/test_pre_route_pr_workflow.py"
+    },
+    {
+      "request": "push back on my changes",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "pr-workflow",
+      "notes": "Idiom overlap; the push trigger's guard word 'back' must suppress it (adr/pr-create-skill-guard.md)"
+    },
+    {
+      "request": "commit these ideas to memory",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "pr-workflow",
+      "notes": "Idiom overlap; the commit trigger's guard word 'ideas' must suppress it (adr/pr-create-skill-guard.md)"
+    },
+    {
+      "request": "merge this in your head",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "pr-workflow",
+      "notes": "Idiom overlap; the merge trigger's guard word 'head' must suppress it (adr/pr-create-skill-guard.md)"
+    },
+    {
+      "request": "publish a book this year",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "pr-workflow",
+      "notes": "Idiom overlap; phrase guard 'publish a book' must suppress the 'publish this' trigger (#993 had renamed it 'content a book') (adr/pr-create-skill-guard.md)"
+    },
+    {
+      "request": "a shared repository of ideas",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "pr-workflow",
+      "notes": "Metaphor; phrase guard 'repository of ideas' must suppress the 'shared repository' trigger, which no longer takes the commit and merge guard word 'ideas'"
+    },
+    {
+      "request": "look for vulnerabilities in my argument",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "security",
+      "notes": "Critique of prose; guard word 'argument' must suppress the 'for vulnerabilities' trigger"
+    },
+    {
+      "request": "address review comments on an upstream PR in a repo I don't own",
+      "expected_agent": null,
+      "expected_skill": "pr-workflow",
+      "category": "pre-route-pr-fix-loop",
+      "routing_tier": "pre_route_only",
+      "notes": "Fix work on a PR in a repo the user does not own: pr-workflow keeps the git gates and pre-route fills pipeline=pr-fix-loop (pinned in test_pre_route.py)"
+    },
+    {
+      "request": "implement the fixes on these open PRs in someone else's repo",
+      "expected_agent": null,
+      "expected_skill": "pr-workflow",
+      "category": "pre-route-pr-fix-loop",
+      "routing_tier": "pre_route_only",
+      "notes": "Fix work on a PR in a repo the user does not own: pr-workflow keeps the git gates and pre-route fills pipeline=pr-fix-loop (pinned in test_pre_route.py)"
+    },
+    {
+      "request": "summarize the upstream PR",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "notes": "Read-only mention of an upstream PR: no change verb, so the pr-fix-loop companion gate must not force-route"
+    },
+    {
+      "request": "what changed in that repo we don't own last week",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "notes": "Read-only mention of an upstream PR: no change verb, so the pr-fix-loop companion gate must not force-route"
+    },
+    {
+      "request": "explain how the pr fix loop works",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "notes": "Read-only or own-repo request: pr-fix-loop guards must not force-route"
+    },
+    {
+      "request": "apply upstream PR changes to my fork",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "notes": "Read-only or own-repo request: pr-fix-loop guards must not force-route"
+    },
+    {
+      "request": "build my Unity project from the command line with the unity cli",
+      "expected_agent": null,
+      "expected_skill": "game-dev",
+      "category": "game-development",
+      "routing_tier": "pre_route_only",
+      "notes": "Unity mode: unity CLI build request force-routes to game-dev (references/unity-cli.md)"
+    },
+    {
+      "request": "Unity.exe -batchmode build fails with exit code 198 and No valid Unity Editor license found",
+      "expected_agent": null,
+      "expected_skill": "game-dev",
+      "category": "game-development",
+      "routing_tier": "pre_route_only",
+      "notes": "Unity mode: batch-mode license failure force-routes to game-dev (references/unity-licensing.md)"
+    },
+    {
+      "request": "run the EditMode tests for my Unity game",
+      "expected_agent": null,
+      "expected_skill": "game-dev",
+      "category": "game-development",
+      "routing_tier": "pre_route_only",
+      "notes": "Unity mode: Unity game test run force-routes to game-dev (references/unity-batchmode-builds.md)"
+    },
+    {
+      "request": "write a short speech about unity and teamwork for the offsite",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "game-dev",
+      "notes": "Plain-English 'unity' must not force-route to game-dev; Unity triggers are multi-word or Unity-only flags"
+    },
+    {
+      "request": "add Unity Catalog permission tests for our Databricks tables",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "game-dev",
+      "notes": "Unity namesake or plain-English 'unity': must not force-route to game-dev (_UNITY_NAMESAKE_GUARD, _UNITY_PROSE_GUARD in pre-route.py)"
+    },
+    {
+      "request": "build Unity Catalog lineage dashboards for the data team",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "game-dev",
+      "notes": "Unity namesake or plain-English 'unity': must not force-route to game-dev (_UNITY_NAMESAKE_GUARD, _UNITY_PROSE_GUARD in pre-route.py)"
+    },
+    {
+      "request": "set up the Unity Catalog CLI for our Databricks workspace",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "game-dev",
+      "notes": "Unity namesake or plain-English 'unity': must not force-route to game-dev (_UNITY_NAMESAKE_GUARD, _UNITY_PROSE_GUARD in pre-route.py)"
+    },
+    {
+      "request": "Unity container tests fail after upgrading to .NET 8",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "game-dev",
+      "notes": "Unity namesake or plain-English 'unity': must not force-route to game-dev (_UNITY_NAMESAKE_GUARD, _UNITY_PROSE_GUARD in pre-route.py)"
+    },
+    {
+      "request": "enable unity builds in CMake to cut our C++ compile time",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "game-dev",
+      "notes": "Unity namesake or plain-English 'unity': must not force-route to game-dev (_UNITY_NAMESAKE_GUARD, _UNITY_PROSE_GUARD in pre-route.py)"
+    },
+    {
+      "request": "write Unity tests for my STM32 firmware with Ceedling",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "game-dev",
+      "notes": "Unity namesake or plain-English 'unity': must not force-route to game-dev (_UNITY_NAMESAKE_GUARD, _UNITY_PROSE_GUARD in pre-route.py)"
+    },
+    {
+      "request": "set up a Unity framework project for our embedded firmware tests",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "game-dev",
+      "notes": "Unity namesake or plain-English 'unity': must not force-route to game-dev (_UNITY_NAMESAKE_GUARD, _UNITY_PROSE_GUARD in pre-route.py)"
+    },
+    {
+      "request": "pdflatex -interaction=batchmode hides my errors, fix the thesis build",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "game-dev",
+      "notes": "Unity namesake or plain-English 'unity': must not force-route to game-dev (_UNITY_NAMESAKE_GUARD, _UNITY_PROSE_GUARD in pre-route.py)"
+    },
+    {
+      "request": "migrate HttpClient.executeMethod calls to Apache HttpClient 5",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "game-dev",
+      "notes": "Unity namesake or plain-English 'unity': must not force-route to game-dev (_UNITY_NAMESAKE_GUARD, _UNITY_PROSE_GUARD in pre-route.py)"
+    },
+    {
+      "request": "draft a toast about unity for the editor's retirement party",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "game-dev",
+      "notes": "Unity namesake or plain-English 'unity': must not force-route to game-dev (_UNITY_NAMESAKE_GUARD, _UNITY_PROSE_GUARD in pre-route.py)"
+    },
+    {
+      "request": "write a WrestleJoy column about unity in the game this year",
+      "expected_agent": null,
+      "expected_skill": null,
+      "category": "false-positive-guard",
+      "routing_tier": "pre_route_negative",
+      "forbid_force_route_to": "game-dev",
+      "notes": "Unity namesake or plain-English 'unity': must not force-route to game-dev (_UNITY_NAMESAKE_GUARD, _UNITY_PROSE_GUARD in pre-route.py)"
+    },
+    {
+      "request": "improve this repo: audit it and write handoff plans another agent can execute",
+      "expected_agent": null,
+      "expected_skill": "improve",
+      "category": "meta-tooling",
+      "routing_tier": "candidate",
+      "notes": "Advisor route: audit, rank, and write plans; improve should appear in the top candidates. A findings report with a verdict and no plans goes to review."
     }
   ]
 }

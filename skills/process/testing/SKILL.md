@@ -120,7 +120,9 @@ internals.
 
 ### Phase 4: Commit
 
-Commit test and implementation as an atomic unit. Run the full suite first.
+Run the full suite first. Commit only when the user asked for commits: then commit test and
+implementation together as one unit, with a one-sentence lowercase message in the AGENTS.md
+writing style (what changed and why). Otherwise leave the change uncommitted and report it.
 
 ### TDD Error Recovery
 
@@ -185,7 +187,7 @@ breaks a previously-passing test, investigate before proceeding.
 
 ### Phase 4: VERIFY
 
-Run full suite. Verify flaky tests are now deterministic (run 3x). Confirm no
+Run full suite. Verify flaky tests are now deterministic (run 3x). Confirm
 no tests were accidentally removed or disabled. Report: bad patterns fixed,
 files modified, tests affected, suite status.
 
@@ -219,6 +221,86 @@ Audit to decide whether a test should exist at all.
 
 **Gate**: Every deletion has all candidate evidence fields recorded. Owner and
 full suites pass. Production and test LOC reported separately.
+
+To find hook or validator tests that miss real bugs, run
+`python3 scripts/mutation-check.py --hook hooks/<name>.py`. It plants small AST
+bugs, runs the tests, and lists surviving mutants. Use `--all` for every hook
+(about 30 minutes) and `--json` for machine output. Run it on demand, not in CI.
+
+### Mutation testing: jev_limits.py, jev_router_common.py
+
+Real mutation testing (cosmic-ray, not the homegrown AST checker above, which
+is scoped to `hooks/` and `scripts/validate-*.py`) for two load-bearing,
+deterministic scripts outside that checker's scope: `scripts/jev_limits.py`
+(split/budget math) and `scripts/jev_router_common.py` (retry/backoff logic).
+Local-only, on request, same as the AST checker above -- not wired into CI.
+Mirrors the switch project's own tradeoff of keeping its Stryker (JS mutation
+testing) run local for speed rather than gating CI on it.
+
+**Tool choice: cosmic-ray over mutmut.** mutmut 3.x copies the mutated
+source into a sandboxed `mutants/` tree and imports it from there; that
+breaks on this repo's convention of `scripts/tests/conftest.py` inserting
+`scripts/` onto `sys.path` so tests can `import jev_limits` as a flat
+top-level module (mutmut's own code warns this exact pattern causes a
+silent "No Tests" result for every mutant). cosmic-ray mutates the real
+file on disk, runs the configured test command, and restores the file --
+no sandbox, no import-path mismatch, no extra `also_copy` plumbing needed
+for `hooks/lib/`, `scripts/jev_images.py`, etc.
+
+**Run** (installs cosmic-ray into a disposable venv; never committed):
+
+```bash
+python3 -m venv .venv && ./.venv/bin/python -m pip install cosmic-ray
+./.venv/bin/cosmic-ray init scripts/cosmic-ray-jev-limits.toml /tmp/jev-limits-mutation.sqlite
+./.venv/bin/cr-filter-operators /tmp/jev-limits-mutation.sqlite scripts/cosmic-ray-jev-limits.toml
+./.venv/bin/cosmic-ray exec scripts/cosmic-ray-jev-limits.toml /tmp/jev-limits-mutation.sqlite
+./.venv/bin/cr-report /tmp/jev-limits-mutation.sqlite
+
+./.venv/bin/cosmic-ray init scripts/cosmic-ray-jev-router-common.toml /tmp/jev-router-common-mutation.sqlite
+./.venv/bin/cr-filter-operators /tmp/jev-router-common-mutation.sqlite scripts/cosmic-ray-jev-router-common.toml
+./.venv/bin/cosmic-ray exec scripts/cosmic-ray-jev-router-common.toml /tmp/jev-router-common-mutation.sqlite
+./.venv/bin/cr-report /tmp/jev-router-common-mutation.sqlite
+```
+
+Each config's `[cosmic-ray.filters.operators-filter]` excludes cosmic-ray's
+full pairwise operator-swap matrix (every arithmetic/bitwise operator
+replaced by every other, every comparison operator by every other) down to
+one classic mutant per real operator family. Most of that matrix is noise
+here: both files use `X | None` PEP 604 type unions, which Python parses as
+a `BitOr` node, and `from __future__ import annotations` stores every
+annotation as a string, so a mutant that swaps that `BitOr` is never
+evaluated and can never be killed. Without the filter, `cosmic-ray init`
+reports 714 candidates for `jev_limits.py` and 1200 for
+`jev_router_common.py`; with it, 203 and 435 actually run.
+
+`cr-report`'s own percentage divides survivors by the *unfiltered* total
+job count (714 / 1200), which understates survivors once filtered-out
+mutants are mixed into that denominator. Read the score as killed /
+(killed + survived) over the mutants that actually ran instead.
+
+**Baseline** (run 2026-10-30, cosmic-ray 8.7.0):
+
+| File | Ran | Killed | Survived | Other | Score |
+|---|---|---|---|---|---|
+| `jev_limits.py` | 203 | 90 | 113 | -- | 44% |
+| `jev_router_common.py` | 435 | 188 | 245 | 2 incompetent | 43% |
+
+The 2 incompetent `jev_router_common.py` mutants are a cosmic-ray 8.7.0
+`ExceptionReplacer` bug (`AttributeError: 'PythonNode' object has no
+attribute 'value'`) on an `except (A, B, ...)` tuple; it is a tool
+limitation, not a test gap, and is excluded from the score above.
+
+Most survivors are `NumberReplacer` hits on policy constants the tests
+check relationally (over/under a limit) rather than pin to an exact value
+(`REQUEST_TOKEN_LIMIT`, `SAFE_FRACTION`, cache TTLs), plus `check_run`'s
+`>`/`>=` boundary comparisons and `call_jev`'s untested telemetry/logging
+branches. `_retry_max`'s default-retry-count constant also survives --
+worth a boundary test (`JEV_RETRY_MAX=0` and the documented default) if this
+module changes again.
+
+Treat a re-run that drops either score below 35% as a regression signal
+worth investigating before merging whatever change caused it; this baseline
+is not a CI gate, just a documented trip wire for local, on-request runs.
 
 ---
 
@@ -277,10 +359,12 @@ bare `vitest` enters watch mode.
 
 | Scope | Command |
 |---|---|
-| Full suite | `npx vitest run --reporter=verbose 2>&1` |
-| File or directory | `npx vitest run path/to/test.ts 2>&1` |
-| Test-name pattern | `npx vitest run -t "pattern" 2>&1` |
-| Coverage | `npx vitest run --coverage 2>&1` |
+| Full suite | `npx --no vitest run --reporter=verbose 2>&1` |
+| File or directory | `npx --no vitest run path/to/test.ts 2>&1` |
+| Test-name pattern | `npx --no vitest run -t "pattern" 2>&1` |
+| Coverage | `npx --no vitest run --coverage 2>&1` |
+
+`--no` makes npx fail instead of downloading Vitest when the project has none.
 
 Capture exit code and full output. Report pass/fail, scope, counts, duration.
 For failures: retain file, test name, assertion diff, relevant stack. Nonzero
@@ -290,7 +374,7 @@ exit is failure; partial output is not a passing run.
 
 | Problem | Fix |
 |---|---|
-| Vitest missing / no node_modules | `npm install` or `npm install -D vitest` |
+| Vitest missing / no node_modules | Report setup needed. `npm install` (declared deps) or `npm install -D vitest` (edits `package.json`) only when the user asks |
 | No test files found | Check naming (`*.test.ts`, `*.spec.ts`) and include/exclude globs |
 | Missing DOM environment | Check for `jsdom`/`happy-dom` in config; suggest devDependency |
 | Out of memory | Batch by directory, use `--pool=forks` or `--shard=1/N` |

@@ -62,11 +62,13 @@ One Jev call per decision cycle. Speculative fan-out: operation Choice + per-ope
 |---|---|
 | `--url`, `--goal` | Required. Loopback URLs only unless `--allow-remote` |
 | `--check-url-contains X`, `--check-text-contains Y` | Deterministic checks that must pass for DONE |
-| `--secret-env LABEL=ENV_VAR` | Type the variable's value into fields whose label contains `LABEL`; unset variable fails preflight |
+| `--secret-env LABEL=ENV_VAR` | Type the variable's value into fields whose label contains `LABEL`; unset variable fails preflight. Refused with `--allow-remote`: name the host with `--allow-host` so a hostile page cannot collect a secret |
 | `--allow-host HOST` | Permit one host and its subdomains (repeatable). Off-origin navigation elsewhere is reverted |
 | `--allow-remote` | Permit any host. Page text then reaches Jev and, for composed text, the text model |
 | `--header NAME=ENV_VAR` | Send a header on every request with the variable's value (staging bypass tokens). Never logged |
-| `--trace FILE` | Write every observed, scrubbed snapshot to FILE |
+| `--trace FILE` | Write every observed snapshot, decision, and verification (scrubbed) to FILE |
+| `--replay FILE` | Answer every decision and verification from a `--trace` FILE instead of calling Jev, at zero Jev cost; still drives a real browser |
+| `--fork N` | With `--replay`: replay steps 1..N for free, then resume live Jev calls from step N+1. The result's `replay` key reports any mismatch against the recorded path and how many live calls ran |
 | `--headed` | Show the browser window |
 | `--max-steps` (60), `--max-requests` (120) | Budgets; requests count Jev calls including text picks and verifies |
 | `--json-compact` | Single-line output |
@@ -98,7 +100,11 @@ One browser per audit, one snapshot per page, one Jev call per goal (~100-200 ms
 - The node registry lives in a CDP isolated world. Page scripts cannot see or rewrite it (live test asserts `typeof window.__jevBrowser === "undefined"` from the page).
 - Loopback URLs only by default. `--allow-host` widens per host. If a click leaves the allowed origin (sign-in redirect, external link), the agent returns to the last good URL, tells Jev which action caused it, and blocks after three such trips.
 - Secrets: the log shows `(secret)`; after a secret is typed, every later snapshot is scrubbed before Jev, the text model, or the log sees it. Password inputs never expose their value (`(filled)`).
-- Page text reaches Jev and the text model as untrusted data. Instructions say so explicitly.
+- Page text reaches Jev and the text model as untrusted data. Instructions say so explicitly. Every page string in a Jev state (title, URL, labels, values, history) is flattened to one capped line by `scripts/lib/jev_untrusted.py`, so it cannot forge a new element row. The text-model prompt wraps page data in `<untrusted-page-data>` tags after redaction and removes any copy of the tag the page planted. `jev_router_common` redacts every Jev payload before send.
+- Jev answers are parsed strictly: an operation that was not offered, a target that was not offered, or a probability that is not a finite number in [0, 1] is a bad answer (`RETRY`, bounded by the stall guard), never executed.
+- A CLICK on a link to a host outside loopback and `--allow-host` is refused before it is sent; a link with no known host is refused too. Text from the text model over 500 characters is refused, not typed.
+- The text API needs `https` (loopback `http` allowed for tests) and never follows a redirect, so its key stays with the configured host. The Node driver and Chromium get an environment without keys, tokens, or the `--secret-env` and `--header` variables.
+- `jev-browser-verify.py --url` and `--audit-file` do not send a page to Jev if it redirected off the allowed hosts.
 - Chromium runs a throwaway profile. Sandboxed launch first; `--no-sandbox` only when Chromium reports "No usable sandbox" (user namespaces disabled). The ready line reports `sandbox: true|false`.
 
 ## Key patterns (learned from jev-ultrafast)
@@ -112,6 +118,8 @@ One browser per audit, one snapshot per page, one Jev call per goal (~100-200 ms
 - **Text reuse only on identical context**: cached by `(url, target, label, current value)`.
 - **Transient Jev errors retry as WAIT** up to `STALL_LIMIT` (3); `unavailable` blocks at once.
 - **Low-confidence picks are held**: a non-DONE operation under `LOW_CONFIDENCE` (0.45) is not executed; the loop re-observes and counts toward the stall guard.
+- **Option order**: the element table is priority-sorted, and Jev leans toward the first option on some inputs. For a high-stakes target (submit, delete, pay), ask the target Choice twice in the same request, once with the options reversed, and act only when both orders agree. The top-to-second probability ratio is a cheaper check on a close pick; measure it against `LOW_CONFIDENCE` before replacing it.
+- **Pre-filter options**: offer only controls that are visible, enabled, and legal for the operation. Offered everything, Jev picks degenerate options repeatedly. A runner-up from `probabilities` is the retry after a no-effect action; never sample.
 - **Settle before judging**: `observe` waits for the DOM to be quiet (600 ms, capped at 3 s) and reports `quiet`; WAIT pauses 1.5 s then settles up to 8 s; a rejected DONE triggers a WAIT before the next decision. Jev sees `page.settled` and history notes when content was still changing.
 - **Whole-page element table**: rendered controls below the fold are offered too, marked `offscreen`; the driver scrolls them into view. Covered controls (modal backdrop, sticky header) are dropped at snapshot time, so an open modal leaves only its own controls.
 - **Links say where they go**: `navigates away to /path` or `leaves this site`, and decide's rules forbid them unless the goal names that page.
@@ -128,6 +136,10 @@ Order for a TYPE_TEXT target:
 The text model writes one value. It never picks actions or judges progress.
 
 ---
+
+## Screenshots and Box
+
+When DOM text cannot identify the target (canvas, charts, icon-only controls, text in images), take a `screenshot`, ask a Box question for the target plus a "visible?" Noul, and click the box center. Keep deterministic verifiers as the veto. Load `references/jev-images.md` for the pattern and code; API and limits: [images.md](../../meta/building-with-jev/references/images.md).
 
 ## Phase 1: OBSERVE
 
@@ -169,6 +181,13 @@ Plus `actions` (`e2:fill`, `e3:sel:ca`, `scroll_down`, `wait`), `page_key`, `gua
 
 **Gate**: loop or stop. Every exit carries `reason`.
 
+### Walkthrough validity
+
+- Count coverage without direct-URL fallbacks. A fallback navigates by URL when the player could not find the control, so it hides sections a player cannot reach (field case: 88 fallbacks on mobile against 43 on desktop, hiding 6 sections).
+- Assert the landing route before you count a probe. A deep-link probe that lands on the wrong screen is inconclusive, not a negative.
+- Check each tile's screen identity before you score it. When the layout has no nav rail (mobile), screen detection can fall back and score a tile as the wrong screen, which invalidates its scores; the screen under the viewport centre wins.
+- Close open overlays (a command palette, a modal) before each click, and tag each failure as a harness failure or a product failure. Most click failures in one field walkthrough were the harness clicking behind an open overlay.
+
 ---
 
 ## Long tasks: checkpoint search
@@ -191,7 +210,7 @@ Apply [Jev production rules](../../shared-patterns/jev-production-lessons.md) wh
 
 - Keep each request at or under the reliable size from `python3 scripts/jev-size-probe.py --payload <dumped requests>` (2.5–4k tokens via Gateway until measured). Large pages grow the element table: bound it by the priority sort and field limits rather than sending the whole page.
 - Use Vercel AI Gateway. Too much context is the most common failure, and page snapshots are the usual cause: estimate each request before sending and trim the element table or split questions rather than send an oversized request. A ~100-token probe that returns proves the cause is size.
-- Retry a lone fast Gateway 503 after 50–150 ms. Back off exponentially on 429/529. Never retry 401/402/422.
+- Retry a lone fast Gateway 503 after 50–150 ms. Back off exponentially on 429/529, honoring `Retry-After` and `retry-after-ms`. Never retry 401/402/422.
 - Every retry counts against `--max-requests`.
 
 ## Error handling
@@ -205,10 +224,11 @@ Every Jev failure resolves to BLOCKED or a bounded WAIT retry. Scripts exit 0 wi
 | `scripts/tests/test_jev_browser_harness.py` | Offline: decide payload/parse, verify parse and veto, agent loop with fake driver (secrets, stale, stall, budget, rejected DONE, Jev-error retry, preflight, scrub) |
 | `scripts/tests/test_jev_browser_live.py` | Real Chromium on a loopback fixture: snapshot contract, password masking, isolated world, covered-target rejection, stale guard, select/checkbox/scroll/submit, end-to-end secret scrubbing. Skips without Node + Chromium |
 
-Field-tested on 5 Star Booker (loopback dev server): closes the help modal, selects promotions, picks a mode, starts booking, spins the venue; the three-page audit from `mmr-ratings-dev/scripts/jev_browser_validate.py` runs through `--audit-file` unchanged.
+Field-tested on a booking-sim web app (loopback dev server): closes the help modal, selects promotions, picks a mode, starts booking, spins the venue; a three-page audit script runs through `--audit-file` unchanged.
 
 ## References
 
+- `references/jev-images.md`: screenshot and Box locate pattern
 - [jev-ultrafast](https://github.com/browser-use/jev-ultrafast): patterns studied, code not reused
 - `docs/PHILOSOPHY.md`: three execution tiers
 - `scripts/jev_router_common.py`: `validated_call_jev`, `bound_text`, `typesafe_available`

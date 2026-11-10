@@ -29,14 +29,22 @@ truth for every one of them ("LLMs orchestrate, programs execute"):
      12000 chars, sensitive paths skipped. context_mode=summary omits file
      excerpts; none omits gathered context. Neither bypasses path validation.
      Fixed repo state => fixed bytes.
-  7. The four MANDATORY verbatim injections: reference loading,
-     completeness, Dense-Complete Writing, base instructions.
+  7. The six MANDATORY verbatim injections: reference loading,
+     completeness, Dense-Complete Writing, Google developer-docs style,
+     base instructions, route-fit.
   8. Optional worktree rules and LOCAL-ONLY block, on flags.
+
+Main-thread execution (`"execution": "main"` or `"agent": "main"`): the marker
+reads `agent=main ... model=inherit ... exec=main` and the output is the marker,
+the Skill-tool calls, and a one-line main-thread note; worker handoff blocks
+are omitted. The CLI then feeds the marker to hooks/routing-decision-recorder.py
+(`--no-record` skips it). Model fields and `flags.worktree` are input errors.
 
 Input schema (missing optional fields degrade gracefully — block omitted):
 
     {
       "agent": "python-general-engineer",          // required; unknown => coerced
+      "execution": "dispatch",                     // optional: dispatch (default) | main
       "fallback_reason": "no-specialist-match",    // required when the agent is
                                                    // general-purpose; slugified
       "skill": "testing",          // required for simple/medium/
@@ -44,10 +52,15 @@ Input schema (missing optional fields degrade gracefully — block omitted):
       "complexity": "medium",                      // required enum, case-insensitive:
                                                    // trivial|simple|medium|complex
       "model": "inherit",                          // required for medium/complex;
-                                                   // optional for trivial/simple
+                                                   // optional for trivial/simple.
+                                                   // Claude: haiku|sonnet|opus|fable
       "model_policy": null,                        // optional policy, not with inherit
       "model_effort": null,                        // explicit picks only, not with inherit
-      "manual_model_override": false,               // required for non-default GPT picks
+      "manual_model_override": false,               // true when the owner named the model
+                                                   // for this task (any model, inherit
+                                                   // included); required for max-power,
+                                                   // non-default GPT picks, policy-differing
+                                                   // picks, opus/xhigh, and <model>/max
       "context_mode": "summary",                   // summary|files|none; default files
       "health": {"confidence": 0.72, "n": 6,       // optional; absent/blank
                  "failure": 0, "action": "keep",   // confidence => health=-
@@ -83,11 +96,13 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
 import subprocess
 import sys
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 # INSTALL_ROOT keeps the invoked path: through ~/.claude/scripts -> <repo>/scripts,
 # inventories (INDEX.json, settings, hook_utils) must come from the deploy dir,
@@ -95,7 +110,9 @@ from pathlib import Path
 # the gather/validation fallback only, since ~/.claude is not a git repo.
 INSTALL_ROOT = Path(__file__).absolute().parent.parent
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SETTINGS_PATH = INSTALL_ROOT / ".claude" / "settings.json"
+# Repo checkout keeps settings under .claude/; an installed ~/.claude holds settings.json directly.
+_SETTINGS_CANDIDATES = (INSTALL_ROOT / ".claude" / "settings.json", INSTALL_ROOT / "settings.json")
+SETTINGS_PATH = next((c for c in _SETTINGS_CANDIDATES if c.is_file()), _SETTINGS_CANDIDATES[0])
 DEFAULT_TOKEN_BUDGET = 500000
 
 # ---------------------------------------------------------------------------
@@ -159,9 +176,23 @@ VALID_COMPLEXITY = ("trivial", "simple", "medium", "complex")
 GPT_56_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
 GPT_56_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 LEGACY_GPT_55 = "gpt-5.5"
-VALID_MODELS = ("inherit", "sonnet", "opus", "codex", LEGACY_GPT_55, *GPT_56_MODELS)
-VALID_PROVIDERS = ("anthropic", "openai", "other")
-ANTHROPIC_MODELS = ("opus", "sonnet")
+GOOGLE_MODELS = (
+    "gemini-4-argon",
+    "gemini-4-argon-low",
+    "gemini-4-argon-medium",
+    "gemini-4-argon-high",
+    "gemini-3.8-flash",
+    "gemini-3.8-flash-low",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-high",
+    "argon",
+    "flash",
+    "flash_lite",
+    "pro",
+)
+VALID_MODELS = ("inherit", "haiku", "sonnet", "opus", "fable", "codex", LEGACY_GPT_55, *GPT_56_MODELS, *GOOGLE_MODELS)
+VALID_PROVIDERS = ("anthropic", "openai", "google", "antigravity", "other")
+ANTHROPIC_MODELS = ("fable", "opus", "sonnet", "haiku")
 
 # DeepSWE Pass@1 / cost benchmark defaults per provider lane.
 # `deterministic` deliberately has no model: use scripts.
@@ -171,19 +202,41 @@ OPENAI_AUTO_POLICIES = {
     "high-risk": ("gpt-5.6-sol", "xhigh"),  # 71 / $4.70
     "max-power": ("gpt-5.6-sol", "max"),  # 73 / $8.39, explicit only
 }
-# Anthropic lane: Opus 5 is the owner-directed default at every task class
-# (it is the model the harness runs). It has no DeepSWE run yet, so these
-# points carry no Pass@1/cost annotation — effort still follows
-# start-low-escalate-on-miss.
+# Anthropic lane: owner policy, 2026-11-01, with the effort ladder from
+# Anthropic's 2026-11-09 model guide (skills/meta/d/references/model-task-fit.md).
+# Opus does all code, edits, debugging, deciding reviews, and decisions. Haiku
+# does read-only gathering that an Opus thread judges. Sonnet is no tier's
+# default (owner: Sonnet code work needed redo).
+# Owner, verbatim, 2026-11-09: "Also I prefer opus 5.5 medium over high". Opus runs at
+# medium on every tier, high-risk included. opus/high is no tier's default: it
+# is an explicit pick (model=opus, model_effort=high, no model_policy) and the
+# escalation step after a failed opus/medium attempt.
+# Past opus/high, go up a model at a lower effort instead of raising effort:
+# haiku -> opus/medium -> opus/high -> fable/medium -> fable/high.
 ANTHROPIC_AUTO_POLICIES = {
-    "low-risk": ("opus", "low"),
+    "low-risk": ("haiku", "low"),  # read-only gathering only
     "standard": ("opus", "medium"),
-    "high-risk": ("opus", "high"),
-    "max-power": ("opus", "xhigh"),  # explicit only
+    "high-risk": ("opus", "medium"),  # owner 2026-11-09: medium over high
+    "max-power": ("fable", "high"),  # explicit only
+}
+# Explicit <model>/max needs manual_model_override=true: the top effort is an
+# escalation, never a starting point.
+_MAX_EFFORT_OVERRIDE_MODELS = frozenset({"opus", "fable", "gemini-4-argon", "gemini-4-argon-high", "argon", "pro"})
+# Google / Antigravity CLI lane (Gemini 4 Argon & Gemini 3.8 Flash):
+# low-risk routes to Flash (fast mechanical/scouting work), standard routes to
+# Argon at medium effort, high-risk routes to Argon-High at high effort, and
+# max-power escalates Argon-High to max effort (requires manual_model_override).
+GOOGLE_AUTO_POLICIES = {
+    "low-risk": ("gemini-3.8-flash", "low"),
+    "standard": ("gemini-4-argon", "medium"),
+    "high-risk": ("gemini-4-argon-high", "high"),
+    "max-power": ("gemini-4-argon-high", "max"),  # explicit only
 }
 AUTO_POLICIES_BY_PROVIDER = {
     "anthropic": ANTHROPIC_AUTO_POLICIES,
     "openai": OPENAI_AUTO_POLICIES,
+    "google": GOOGLE_AUTO_POLICIES,
+    "antigravity": GOOGLE_AUTO_POLICIES,
 }
 # Backward compat: tests and the OpenAI-only path reference this name.
 AUTO_MODEL_POLICIES = OPENAI_AUTO_POLICIES
@@ -192,6 +245,18 @@ VALID_MODEL_POLICIES = ("deterministic", *AUTO_MODEL_POLICIES)
 # Trivial/simple retain their existing optional-model behavior.
 _MODEL_REQUIRED_COMPLEXITY = frozenset({"medium", "complex"})
 VALID_ACTIONS = ("keep", "demote", "tiebreak")
+# Main-thread execution (Anthropic lane, owner 2026-11-01). Trivial and Simple
+# work runs in the /do thread: a dispatched worker cold-reloads about 20k tokens of
+# instructions and re-reads files the main thread already holds. The marker
+# records the route as `agent=main ... model=inherit ... exec=main`, and the CLI
+# feeds it to hooks/routing-decision-recorder.py, so route telemetry still
+# counts work that fires no PostToolUse:Agent event.
+MAIN_THREAD_AGENT = "main"
+VALID_EXECUTIONS = ("dispatch", "main")
+MAIN_THREAD_NOTE = (
+    "Execution: main thread. Load the skill(s) above and do the work in this thread. "
+    "Do not dispatch an Agent for this route."
+)
 
 _AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _SKILL_RE = re.compile(r"^[a-z0-9-]+$")
@@ -205,7 +270,14 @@ AGENT_INDEX_PATH = INSTALL_ROOT / "agents" / "INDEX.json"
 AGENT_INDEX_LOCAL = "INDEX.local.json"
 SKILL_INDEX_PATH = INSTALL_ROOT / "skills" / "INDEX.json"
 SKILL_INDEX_LOCAL = "INDEX.local.json"
-PIPELINE_INDEX_PATH = INSTALL_ROOT / "skills" / "process" / "workflow" / "references" / "pipeline-index.json"
+# Installed layout links skills per skill (~/.claude/skills/workflow -> <repo>/skills/process/workflow),
+# so the nested repo path is absent there. Installed first, then the repo checkout.
+PIPELINE_INDEX_CANDIDATES = (
+    INSTALL_ROOT / "skills" / "workflow" / "references" / "pipeline-index.json",
+    INSTALL_ROOT / "skills" / "process" / "workflow" / "references" / "pipeline-index.json",
+    REPO_ROOT / "skills" / "process" / "workflow" / "references" / "pipeline-index.json",
+)
+PIPELINE_INDEX_PATH = next((c for c in PIPELINE_INDEX_CANDIDATES if c.is_file()), PIPELINE_INDEX_CANDIDATES[1])
 SHARED_PATTERNS_DIR = INSTALL_ROOT / "skills" / "shared-patterns"
 # Installed-index resolution (installer spec 7.2): $VEXJOY_INDEX_DIR, then
 # ~/.<runtime>/vexjoy/index/<kind>.json, then the deploy-dir index + legacy
@@ -236,6 +308,9 @@ def _resolved_source(kind: str, tracked: Path, local_name: str | None) -> tuple[
 # validate-do-references.py's set: the Agent tool accepts these names, so
 # coercing them would MANUFACTURE fallbacks instead of catching them.
 BUILTIN_AGENTS = frozenset({"general-purpose", "claude", "explore", "plan", "statusline-setup"})
+# Router entry points: indexed skills whose job is to route a request
+# (scripts/jev-route.py ROUTER_ENTRY_POINT_SKILLS). Never a Skill-tool call.
+ROUTER_ENTRY_POINT_SKILLS = frozenset({"d", "do"})
 # Reason slug charset — same shape as alts=/stack= items, so the token can never
 # grow a space and split the marker line into two tokens.
 _FALLBACK_REASON_RE = re.compile(r"^[a-z0-9][a-z0-9:_-]*$")
@@ -244,7 +319,7 @@ _FALLBACK_REASON_MAX = 80
 # Complexities where a skill is mandatory. do/SKILL.md already states this as
 # the "Skill-greediness gate (HARD — non-negotiable for Simple+)"; 23 of the 128
 # recorded fallbacks violated it because nothing enforced it. Trivial dispatches
-# stay exempt (they carry no skill by frontend).
+# stay exempt (they carry no skill by design).
 _SKILL_REQUIRED_COMPLEXITY = frozenset({"simple", "medium", "complex"})
 
 # Complexity -> thinking directive. Trivial never dispatches; medium is
@@ -295,6 +370,11 @@ def _optional_effort(value: object) -> str | None:
     return effort
 
 
+def _policy_summary(policies: dict[str, tuple[str, str]]) -> str:
+    """Render a policy table as ``tier=model/effort`` pairs for an error message."""
+    return ", ".join(f"{tier}={model}/{effort}" for tier, (model, effort) in policies.items())
+
+
 def _resolve_provider(decision: dict) -> str:
     """Extract and validate the provider field; default 'anthropic' (Claude Code)."""
     raw = decision.get("provider")
@@ -312,12 +392,20 @@ def resolve_model_selection(decision: dict, provider: str = "anthropic") -> tupl
     """Return the validated ``(model, effort)`` for one dispatch decision.
 
     Harness-aware: ``provider`` selects the automatic policy table.
-    Anthropic lane defaults select Opus 5 at every task class (owner
-    directive + current session model); sonnet is manual-only, kept for
-    cost, context-window, and latency constraints.
+    Anthropic lane defaults map low-risk to haiku (read-only gathering),
+    standard and high-risk to opus/medium, and max-power to fable/high
+    (owner policy 2026-11-01; owner 2026-11-09: "Also I prefer opus 5.5
+    medium over high"). opus/high is no tier's default: pick it explicitly
+    (model=opus, model_effort=high, no model_policy) to escalate after a
+    failed opus/medium attempt. Explicit haiku, sonnet, opus, and fable
+    need no override, except opus/xhigh and opus/max or fable/max.
     OpenAI lane defaults select GPT-5.6 Sol/Terra.  Effort is recorded in
     the marker for all models; for Claude lanes it is advisory (the harness
     Agent tool does not accept per-call effort).
+
+    ``manual_model_override=true`` records an owner per-task model pick. It is
+    accepted with every model, ``inherit`` included (the owner named the
+    session model).
     """
     manual = decision.get("manual_model_override", False)
     if not isinstance(manual, bool):
@@ -329,8 +417,8 @@ def resolve_model_selection(decision: dict, provider: str = "anthropic") -> tupl
     effort = _optional_effort(decision.get("model_effort"))
 
     if model == "inherit":
-        if policy or effort is not None or manual:
-            raise InputError("model='inherit' cannot include model_policy, model_effort, or manual_model_override=true")
+        if policy or effort is not None:
+            raise InputError("model='inherit' cannot include model_policy or model_effort")
         return "inherit", None
 
     if policy:
@@ -342,7 +430,7 @@ def resolve_model_selection(decision: dict, provider: str = "anthropic") -> tupl
         policies = AUTO_POLICIES_BY_PROVIDER.get(provider)
         if policies is None:
             raise InputError(
-                f"model_policy requires provider 'anthropic' or 'openai', got {provider!r}; "
+                f"model_policy requires provider 'anthropic', 'openai', or 'google'/'antigravity', got {provider!r}; "
                 "use an explicit model for other harnesses"
             )
 
@@ -351,15 +439,24 @@ def resolve_model_selection(decision: dict, provider: str = "anthropic") -> tupl
             raise InputError("model_policy='max-power' requires manual_model_override=true")
         if (model is not None and model != expected_model) or (effort is not None and effort != expected_effort):
             if not manual:
+                hint = ""
+                if provider == "anthropic" and (model or expected_model) == "opus" and effort == "high":
+                    hint = (
+                        ". opus/high is no tier's default (owner 2026-11-09: opus medium over high); "
+                        "to escalate after a failed opus/medium attempt, pass model='opus' with "
+                        "model_effort='high' and no model_policy"
+                    )
                 raise InputError(
                     f"model_policy={policy!r} selects {expected_model}/{expected_effort}; "
-                    "use manual_model_override=true for another choice"
+                    f"use manual_model_override=true for another choice{hint}"
                 )
             override_model = model or expected_model
             if provider == "openai" and override_model not in GPT_56_MODELS:
                 raise InputError("OpenAI model_policy overrides must use a GPT-5.6 model")
             if provider == "anthropic" and override_model not in ANTHROPIC_MODELS:
                 raise InputError("Anthropic model_policy overrides must use a Claude model")
+            if provider in ("google", "antigravity") and override_model not in GOOGLE_MODELS:
+                raise InputError("Google/Antigravity model_policy overrides must use a Google/Gemini model")
             if model is not None and model != expected_model and effort is None:
                 raise InputError("manual model overrides require 'model_effort'")
             return override_model, effort or expected_effort
@@ -384,17 +481,16 @@ def resolve_model_selection(decision: dict, provider: str = "anthropic") -> tupl
             raise InputError("legacy gpt-5.5 requires manual_model_override=true")
         return model, effort
 
-    # Claude models (opus, sonnet) and codex wrapper.
-    # Effort is optional and advisory for Claude lanes — recorded in the
-    # marker (model@effort) for telemetry but not passed to the Agent tool.
-    if model == "sonnet":
-        if not manual:
-            raise InputError(
-                f"'{model}' requires manual_model_override=true "
-                "(Opus 5 is the Anthropic-lane default; off-policy picks stay explicit)"
-            )
-    if model == "opus" and effort == "max" and not manual:
-        raise InputError("opus/max requires manual_model_override=true (unmeasured top tier; escalate on a miss)")
+    # Claude models (fable, opus, sonnet, haiku), Google models (gemini-4-argon*,
+    # gemini-3.8-flash*, flash_lite, flash, pro), and codex wrapper.
+    # Effort is optional and recorded in the marker (model@effort) for telemetry.
+    if model == "opus" and effort == "xhigh" and not manual:
+        raise InputError(
+            "opus/xhigh requires manual_model_override=true; test fable at high first "
+            "(past high, the next model up at a lower effort costs less than one more effort level)"
+        )
+    if model in _MAX_EFFORT_OVERRIDE_MODELS and effort == "max" and not manual:
+        raise InputError(f"{model}/max requires manual_model_override=true (unmeasured top tier; escalate on a miss)")
     return model, effort
 
 
@@ -468,6 +564,57 @@ def _load_index_names(index_path: Path, field: str, local_name: str | None = Non
     return frozenset(names)
 
 
+@lru_cache(maxsize=8)
+def _load_index_entries(index_path: Path, field: str, local_name: str | None = None) -> dict[str, dict]:
+    """Load dictionary entries from a tracked index and local overlay."""
+    entries: dict[str, dict] = {}
+    paths = [index_path]
+    if local_name:
+        paths.append(index_path.parent / local_name)
+    for path in paths:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        data = raw.get(field)
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if isinstance(v, dict):
+                    entries[str(k).strip().lower()] = v
+    return entries
+
+
+def load_skill_index_entries() -> dict[str, dict]:
+    """Return dictionary of known skill entries from the resolved skills index."""
+    path, local = _resolved_source("skills", SKILL_INDEX_PATH, SKILL_INDEX_LOCAL)
+    return _load_index_entries(path, "skills", local)
+
+
+def get_skill_operational_summary(skill_name: str) -> str:
+    """Return the operational description/summary of a skill if available."""
+    clean_name = skill_name.strip().lower()
+    entries = load_skill_index_entries()
+    if clean_name in entries:
+        desc = entries[clean_name].get("description")
+        if isinstance(desc, str) and desc.strip():
+            return " ".join(desc.strip().split())
+    # Fallback to checking deployed skill or repo file
+    candidates = [
+        Path.home() / ".gemini" / "skills" / clean_name / "SKILL.md",
+        INSTALL_ROOT / "skills" / clean_name / "SKILL.md",
+    ]
+    for cand in candidates:
+        if cand.is_file():
+            try:
+                txt = cand.read_text(encoding="utf-8")
+                match = re.search(r"^---\n.*?\ndescription:\s*([^\n]+)", txt, re.DOTALL)
+                if match:
+                    return match.group(1).strip().strip("\"'")
+            except OSError:
+                pass
+    return ""
+
+
 def load_known_skills(index_path: Path | None = None) -> frozenset[str]:
     """Return active skill names from the resolved index (installed first), else
     the tracked index plus local overlay."""
@@ -489,6 +636,52 @@ def load_known_stack_patterns(patterns_dir: Path = SHARED_PATTERNS_DIR) -> froze
         return frozenset(path.stem.lower() for path in patterns_dir.glob("*.md") if path.is_file())
     except OSError:
         return frozenset()
+
+
+@lru_cache(maxsize=1)
+def _trigger_claims() -> dict[str, tuple[str, ...]]:
+    """Map every trigger phrase and category name → the skills that claim it, in index order.
+
+    Used by _canonical_skill_for_trigger to coerce router mistakes where the
+    LLM outputs a trigger phrase or manifest category label instead of the
+    canonical skill name (e.g. skill="pr-review" → "review", or
+    skill="code-review" when that is review's category).  Returns an empty
+    dict on read failure (callers then fall through to the original InputError).
+    """
+    claims: dict[str, list[str]] = {}
+    try:
+        path, _ = _resolved_source("skills", SKILL_INDEX_PATH, SKILL_INDEX_LOCAL)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        for skill_name, data in (raw.get("skills") or {}).items():
+            name_lc = skill_name.strip().lower()
+            aliases = [str(t).strip().lower() for t in data.get("triggers") or []]
+            cat = (data.get("category") or "").strip().lower()
+            if cat:
+                aliases.append(cat)
+            for alias in aliases:
+                owners = claims.setdefault(alias, [])
+                if name_lc not in owners:
+                    owners.append(name_lc)
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError) as exc:
+        print(f"[build-dispatch] warning: could not load trigger map: {exc}", file=sys.stderr)
+    return {alias: tuple(owners) for alias, owners in claims.items()}
+
+
+def _canonical_skill_for_trigger(name: str, known_skills: frozenset[str]) -> str | None:
+    """Return the skill a trigger phrase or category alias names, or None when no known skill claims it.
+
+    Coerces only an alias exactly one known skill claims. An alias several
+    skills share raises: coercing it to the first claimant turned "language"
+    into a private modding skill and "infrastructure" into the browser driver,
+    and the marker then recorded that pick as the route.
+    """
+    owners = [skill for skill in _trigger_claims().get(name.lower(), ()) if skill in known_skills]
+    if len(owners) > 1:
+        raise InputError(
+            f"skill call {name!r} is a trigger or category that {len(owners)} skills share "
+            f"({', '.join(sorted(owners))}); name the skill itself"
+        )
+    return owners[0] if owners else None
 
 
 def ordered_skill_calls(decision: dict) -> list[str]:
@@ -514,6 +707,11 @@ def ordered_skill_calls(decision: dict) -> list[str]:
         if name in seen:
             continue
         seen.add(name)
+        if name in ROUTER_ENTRY_POINT_SKILLS:
+            raise InputError(
+                f"skill call {name!r} names a router entry point; a Skill call to it re-enters the router "
+                f"on the same request, so name the skill that does the work"
+            )
         if name in known_skills:
             ordered.append(name)
             continue
@@ -523,13 +721,35 @@ def ordered_skill_calls(decision: dict) -> list[str]:
             raise InputError(f"skill call {name!r} names an agent; dispatch it with the Agent tool")
         if name in known_pipelines:
             raise InputError(f"skill call {name!r} names a pipeline; run it through workflow dispatch")
+        # Coerce trigger phrases and category aliases to the canonical skill name.
+        # The LLM router may output a trigger from the manifest (e.g. "pr-review"
+        # instead of "review") or a category label rendered as "(code-review)" in
+        # the manifest line for the "review" skill.
+        canonical = _canonical_skill_for_trigger(name, known_skills)
+        if canonical is not None:
+            if canonical not in seen:
+                seen.add(canonical)
+                ordered.append(canonical)
+            continue
         raise InputError(f"skill call {name!r} is absent from skills/INDEX.json")
     return ordered
 
 
 def render_skill_calls(decision: dict) -> str:
     """Render the A/B-winning action contract once per callable skill."""
-    return "\n".join(f"Call the Skill tool with `{name}`." for name in ordered_skill_calls(decision))
+    provider = str(decision.get("provider") or "").strip().lower()
+    calls = ordered_skill_calls(decision)
+    if provider in ("google", "antigravity"):
+        directives = []
+        for i, name in enumerate(calls):
+            line = f"Read and follow ~/.gemini/skills/{name}/SKILL.md before starting work."
+            if i == 0:
+                summary = get_skill_operational_summary(name)
+                if summary:
+                    line += f"\nOperational Summary ({name}): {summary}"
+            directives.append(line)
+        return "\n".join(directives)
+    return "\n".join(f"Call the Skill tool with `{name}`." for name in calls)
 
 
 def resolve_pipeline(decision: dict) -> str:
@@ -541,7 +761,8 @@ def resolve_pipeline(decision: dict) -> str:
         raise InputError(f"'pipeline' {pipeline!r} — must match [a-z0-9-]+")
     known = load_known_pipelines()
     if not known:
-        raise InputError("cannot validate pipeline: pipeline-index.json is unreadable or empty")
+        tried = ", ".join(str(c) for c in dict.fromkeys((PIPELINE_INDEX_PATH, *PIPELINE_INDEX_CANDIDATES)))
+        raise InputError(f"cannot validate pipeline: pipeline-index.json is unreadable or empty (tried: {tried})")
     if pipeline not in known:
         raise InputError(f"'pipeline' {pipeline!r} is absent from pipeline-index.json")
     return pipeline
@@ -564,8 +785,27 @@ def slugify_fallback_reason(value: object) -> str:
     return slug
 
 
+def resolve_execution(decision: dict) -> str:
+    """Return ``dispatch`` or ``main``; ``agent='main'`` implies main-thread execution."""
+    raw = decision.get("execution")
+    execution = str(raw).strip().lower() if raw is not None else ""
+    if not execution:
+        agent = str(decision.get("agent") or "").strip().lower()
+        execution = "main" if agent == MAIN_THREAD_AGENT else "dispatch"
+    if execution not in VALID_EXECUTIONS:
+        raise InputError(f"'execution' {raw!r} — must be one of {'/'.join(VALID_EXECUTIONS)}")
+    if execution == "main":
+        flags = decision.get("flags") or {}
+        if isinstance(flags, dict) and flags.get("worktree"):
+            raise InputError("execution='main' cannot use flags.worktree; worktree isolation needs a dispatch")
+    return execution
+
+
 def resolve_agent(decision: dict) -> tuple[str, str]:
     """Return the validated ``(agent, fallback_reason)`` for one dispatch.
+
+    Main-thread execution always records ``agent=main`` with no fallback: no
+    agent was dispatched, so neither index coercion nor a fallback reason applies.
 
     Two rules the router already had but nothing enforced:
 
@@ -580,6 +820,8 @@ def resolve_agent(decision: dict) -> tuple[str, str]:
        non-empty reason, so every fallback is justified and countable instead
        of being an invisible default.
     """
+    if resolve_execution(decision) == "main":
+        return MAIN_THREAD_AGENT, ""
     agent = _require_str(decision, "agent").lower()
     if not _AGENT_RE.match(agent):
         raise InputError(f"'agent' {agent!r} — must match [a-z0-9][a-z0-9-]*")
@@ -627,7 +869,9 @@ def build_marker(decision: dict) -> str:
 
     # Validate the primary and stack names before emitting telemetry. This also
     # prevents an agent or pipeline token from later becoming a Skill-tool call.
-    ordered_skill_calls(decision)
+    calls = ordered_skill_calls(decision)
+    if skill != "-" and calls:
+        skill = calls[0]  # a coerced trigger/category alias is recorded as its canonical skill
     pipeline = resolve_pipeline(decision)
 
     parts = [f"[do-route] agent={agent}", f"skill={skill}", f"complexity={complexity}"]
@@ -638,7 +882,14 @@ def build_marker(decision: dict) -> str:
     # Effort token included for all models so telemetry can distinguish each
     # benchmarked point; advisory for Claude lanes (Agent tool has no effort param).
     provider = _resolve_provider(decision)
-    model, effort = resolve_model_selection(decision, provider)
+    main_thread = agent == MAIN_THREAD_AGENT
+    if main_thread:
+        # The work runs on the session model; no per-route model applies.
+        if any(decision.get(k) not in (None, "", "-", "inherit") for k in ("model", "model_policy", "model_effort")):
+            raise InputError("execution='main' runs on the session model; omit model, model_policy, and model_effort")
+        model, effort = "inherit", None
+    else:
+        model, effort = resolve_model_selection(decision, provider)
     if model is not None:
         parts.append(f"model={model}")
         if effort is not None:
@@ -649,7 +900,8 @@ def build_marker(decision: dict) -> str:
                 f"'model' is required for complexity={complexity} "
                 f"(allowed: {'/'.join(VALID_MODELS)}). "
                 f"Omitting model inherits the session main-loop model — "
-                f"set model=inherit deliberately or select a supported model/policy."
+                f"set model=inherit deliberately or select a supported model/policy "
+                f"(Anthropic policies: {_policy_summary(ANTHROPIC_AUTO_POLICIES)})."
             )
         parts.append("model=-")
 
@@ -690,6 +942,9 @@ def build_marker(decision: dict) -> str:
     # against the real recorder in scripts/tests/test_build_dispatch.py.
     if fallback_reason:
         parts.append(f"fallback={fallback_reason}")
+    # `exec=main` last for the same reason; main-thread routes carry no fallback.
+    if main_thread:
+        parts.append("exec=main")
 
     return " ".join(parts)
 
@@ -1038,6 +1293,10 @@ def build_preamble(
     context_mode(decision)
     marker = build_marker(decision)
     skill_calls = render_skill_calls(decision)
+    if marker.endswith(" exec=main"):
+        # Main thread: the worker handoff blocks (Task Spec, repo state,
+        # injections) have no reader; the thread already holds that context.
+        return "\n\n".join(block for block in (marker, skill_calls, MAIN_THREAD_NOTE) if block) + "\n"
     thinking = build_thinking(decision)
     token_line = build_token_line(decision, settings_path)
     task_spec = build_task_spec(decision)
@@ -1062,6 +1321,96 @@ def build_preamble(
     return "\n\n".join(block for block in blocks if block) + "\n"
 
 
+def load_build_subagent_spec_fn():
+    """Dynamically load build_subagent_spec helper from build-subagent-spec.py."""
+    spec_path = Path(__file__).resolve().parent / "build-subagent-spec.py"
+    if not spec_path.is_file():
+        return None
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("build_subagent_spec", spec_path)
+    if not spec or not spec.loader:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return getattr(mod, "build_subagent_spec", None)
+
+
+def build_subagent_dispatch(
+    decision: dict,
+    *,
+    gather: bool = True,
+    repo_root: Path | None = None,
+) -> dict[str, Any]:
+    """Combine subagent persona generation with task dispatch preamble for Antigravity."""
+    agent_name = str(decision.get("agent") or "").strip()
+    fn = load_build_subagent_spec_fn()
+    subagent_spec: dict[str, Any] = {}
+    if fn:
+        try:
+            subagent_spec = fn(agent_name, repo_root=repo_root)
+        except Exception:
+            subagent_spec = {}
+
+    preamble = build_preamble(decision, gather=gather, repo_root=repo_root)
+
+    category = subagent_spec.get("category", "implementer")
+    default_workspace = "inherit" if category in ("reviewer", "scout") else "branch"
+
+    return {
+        "subagent_spec": subagent_spec,
+        "preamble": preamble,
+        "define_subagent": subagent_spec.get("define_subagent", {}),
+        "invoke_subagent": {
+            "TypeName": subagent_spec.get("Name", agent_name),
+            "Role": subagent_spec.get("Description", agent_name),
+            "Prompt": preamble,
+            "Workspace": default_workspace,
+            "Model": decision.get("model", "gemini-4-argon"),
+        },
+    }
+
+
+RECORDER_CANDIDATES = (
+    INSTALL_ROOT / "hooks" / "routing-decision-recorder.py",
+    REPO_ROOT / "hooks" / "routing-decision-recorder.py",
+)
+
+
+def record_main_thread_route(marker: str, decision: dict) -> bool:
+    """Feed a main-thread marker to the routing-decision recorder; never raises.
+
+    Main-thread work fires no PostToolUse:Agent event, so the recorder never
+    sees it. This hands the recorder the same event shape an Agent dispatch
+    produces, so one code path writes the decision row and the pending outcome
+    that the next-turn finalizer resolves. Returns True when the recorder ran.
+    """
+    recorder = next((c for c in RECORDER_CANDIDATES if c.is_file()), None)
+    if recorder is None:
+        return False
+    spec = decision.get("task_spec") if isinstance(decision.get("task_spec"), dict) else {}
+    snippet = str(spec.get("intent") or spec.get("request_verbatim") or "").strip()
+    event = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Agent",
+        "session_id": os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID") or "",
+        "tool_input": {"prompt": marker, "description": f"main-thread: {snippet}"[:200]},
+        "tool_response": "",
+    }
+    try:
+        subprocess.run(
+            [sys.executable, str(recorder)],
+            input=json.dumps(event),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build the /do Phase 4 dispatch preamble from a routing decision.")
     source = parser.add_mutually_exclusive_group(required=True)
@@ -1069,10 +1418,20 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--json-file", help="Path to a routing-decision JSON file ('-' = stdin)")
     parser.add_argument("--no-gather", action="store_true", help="Skip the '## Repo state (auto-gathered)' block")
     parser.add_argument(
+        "--subagent-spec",
+        action="store_true",
+        help="Output full Antigravity define_subagent and invoke_subagent JSON spec alongside preamble",
+    )
+    parser.add_argument(
         "--repo-root",
         type=Path,
         default=None,
         help="Root for path validation and repo-state gathering (default: cwd's git toplevel, else this script's repo)",
+    )
+    parser.add_argument(
+        "--no-record",
+        action="store_true",
+        help="Main-thread routes only: skip feeding the marker to routing-decision-recorder",
     )
     args = parser.parse_args(argv)
 
@@ -1092,7 +1451,20 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        sys.stdout.write(build_preamble(decision, gather=not args.no_gather, repo_root=args.repo_root))
+        if args.subagent_spec or decision.get("subagent_spec"):
+            sys.stdout.write(
+                json.dumps(
+                    build_subagent_dispatch(decision, gather=not args.no_gather, repo_root=args.repo_root),
+                    indent=2,
+                )
+                + "\n"
+            )
+        else:
+            preamble = build_preamble(decision, gather=not args.no_gather, repo_root=args.repo_root)
+            sys.stdout.write(preamble)
+            marker = preamble.split("\n", 1)[0]
+            if marker.endswith(" exec=main") and not args.no_record:
+                record_main_thread_route(marker, decision)
     except InputError as exc:
         print(f"build-dispatch: {exc}", file=sys.stderr)
         return 2

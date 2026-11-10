@@ -36,14 +36,18 @@ def _registrations() -> list[dict]:
     generator = _load_generator()
     entries = generator.parse_allowlist(ALLOWLIST.read_text(encoding="utf-8"))
     generated = generator.build_hooks_json(entries, codex_hooks_dir=str(HOOKS))
-    commands: dict[tuple[str, str], str] = {}
+    # Keyed by matcher too: one hook can have a Bash entry and an apply_patch entry.
+    commands: dict[tuple[str, str, str], str] = {}
     for event, groups in generated["hooks"].items():
         for group in groups:
             for handler in group["hooks"]:
                 args = shlex.split(handler["command"])
                 filename = Path(args[args.index("--hook") + 1]).name
-                commands[(event, filename)] = handler["command"]
-    return [{**entry, "command": commands[(entry["event"], entry["filename"])]} for entry in entries]
+                commands[(event, filename, args[args.index("--matcher") + 1])] = handler["command"]
+    return [
+        {**entry, "command": commands[(entry["event"], entry["filename"], entry["matcher"] or "*")]}
+        for entry in entries
+    ]
 
 
 REGISTRATIONS = _registrations()
@@ -70,6 +74,7 @@ def _semantic_contracts() -> dict[tuple[str, str], str]:
     add("SessionStart", "context:[team-config]", "team-config-loader.py")
     add("SessionStart", "context:<rules-distill-candidates>", "rules-distill-injector.py")
     add("SessionStart", "context:[manifest-cache] refreshed", "session-manifest-cache.py")
+    add("SessionStart", "context:agent-summary blocker", "session-no-agent-summary-check.py")
     add("SessionStart", "noaction:herdr-absent", "herdr-state-reporter.py")
     add("SessionStart", "noaction:empty-registry", "session-task-registry.py")
     add("SessionStart", "noaction:ephemeral-worktree-guard", "sync-to-user-claude.py")
@@ -86,11 +91,13 @@ def _semantic_contracts() -> dict[tuple[str, str], str]:
         "allow",
         "pretool-branch-safety.py",
         "ci-merge-gate.py",
+        "pretool-review-before-push-gate.py",
         "pretool-ruff-format-gate.py",
         "pretool-private-name-leak-gate.py",
         "security-review-hook.py",
         "pretool-unified-gate.py",
         "pretool-worktree-edit-guard.py",
+        "pretool-config-protection.py",
         "pretool-synthesis-gate.py",
         "pretool-plan-gate.py",
         "pretool-prompt-injection-scanner.py",
@@ -122,7 +129,7 @@ def _semantic_contracts() -> dict[tuple[str, str], str]:
     add("Stop", "state:learning-db", "session-summary.py")
     add("Stop", "deny:Toolkit drift detected", "stop-drift-guard.py")
     add("Stop", "context:[rules-distill]", "rules-distill-trigger.py")
-    add("Stop", "state:routing-drained", "routing-outcome-stop-fallback.py")
+    add("Stop", "state:routing-kept", "routing-outcome-stop-fallback.py")
     return contracts
 
 
@@ -586,13 +593,15 @@ def _assert_meaningful(
         assert isinstance(state_path, Path)
         state = json.loads(state_path.read_text(encoding="utf-8"))
         assert len(state["pending"]) == 1 and state["pending"][0]["attempts"] == 1
-    elif contract == "state:routing-drained":
-        # The Stop fallback calls finalize_pending_outcomes, which atomically
-        # reads AND clears pending, so the seeded entry must be gone.
+    elif contract == "state:routing-kept":
+        # Stop fires after every turn. A fresh, clean entry must stay pending
+        # so the UserPromptSubmit finalizer can read the user's reaction; Stop
+        # takes only errored and stale entries.
         state_path = evidence["routing_state"]
         assert isinstance(state_path, Path)
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        assert state["pending"] == [], f"{key} left pending outcomes unresolved at session end"
+        assert len(state["pending"]) == 1, f"{key} drained a fresh pending outcome at Stop"
+        assert state["pending"][0]["key"] == "runtime:missing-row"
     else:
         raise AssertionError(f"unknown runtime semantic contract: {contract}")
 
@@ -616,9 +625,11 @@ def _cleanup_global_state(session_id: str) -> None:
 
 
 def test_runtime_inventory_contains_all_supported_registrations() -> None:
-    assert len(REGISTRATIONS) == 59, "runtime matrix must execute every supported registration"
+    # 63 entries for 62 Claude registrations: the unified gate runs on Bash and apply_patch.
+    assert len(REGISTRATIONS) == 63, "runtime matrix must execute every supported registration"
+    assert len({(item["event"], item["filename"], item["matcher"]) for item in REGISTRATIONS}) == 63
     registrations = {(item["event"], item["filename"]) for item in REGISTRATIONS}
-    assert len(registrations) == 59
+    assert len(registrations) == 62
     assert set(SEMANTIC_CONTRACTS) == registrations, "every registration needs one explicit semantic contract"
 
 

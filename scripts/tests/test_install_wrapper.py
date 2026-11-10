@@ -117,8 +117,33 @@ def test_uninstall_then_rollback(home: Path) -> None:
         assert not (home / f".{t}" / "skills" / "do").exists(), t
     rb = run_install(home, "--rollback")
     assert rb.returncode == 0, rb.stdout + rb.stderr
-    assert "Restoring trash session" in rb.stdout
+    assert "[rollback] run install-" in rb.stdout and "(uninstall)" in rb.stdout, rb.stdout
     assert (home / ".claude" / "skills" / "do" / "SKILL.md").is_file()
+    again = run_install(home, "--rollback")
+    assert again.returncode == 0 and "already rolled back" in again.stdout, again.stdout + again.stderr
+
+
+def test_rollback_restores_the_whole_last_run(home: Path) -> None:
+    # One ./install.sh run trashes into two sessions: apply's takeover, then the prune after it.
+    # --rollback used to restore only the newest session (the prune's), so the taken-over copy stayed lost.
+    skills = home / ".hermes" / "skills"
+    stale = skills / "do"
+    stale.mkdir(parents=True)
+    (stale / "SKILL.md").write_text("---\nname: do\ndescription: stale legacy copy\n---\n")
+    gone = skills / "gone-skill"
+    gone.symlink_to(home / "nowhere")
+    r = run_install(home, "--target", "hermes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "stale legacy copy" not in (stale / "SKILL.md").read_text()
+    assert not os.path.lexists(gone)
+    before = tree(home)
+    dry = run_install(home, "--rollback", "--dry-run")
+    assert dry.returncode == 0 and "would restore run install-" in dry.stdout, dry.stdout + dry.stderr
+    assert tree(home) == before
+    rb = run_install(home, "--rollback")
+    assert rb.returncode == 0, rb.stdout + rb.stderr
+    assert os.path.islink(gone)
+    assert "stale legacy copy" in (stale / "SKILL.md").read_text(), rb.stdout
 
 
 def test_deprecated_flags_are_accepted(home: Path) -> None:
@@ -147,3 +172,50 @@ def test_home_inside_repo_is_refused_by_the_engine(tmp_path: Path) -> None:
     )
     assert r.returncode == 4, r.stdout + r.stderr
     assert "inside" in r.stderr
+
+
+# --- install_deps: requirements go into the hook python too ------------------------------------------
+
+
+def _install_deps_harness(tmp_path: Path, *, same: bool) -> list[str]:
+    """Run install.sh's install_deps against logging fake pythons; return the pip invocations."""
+    log = tmp_path / "pip.log"
+    home = tmp_path / "h"
+    linked = home / ".claude" / "vexjoy" / "bin" / "python3"
+    linked.parent.mkdir(parents=True)
+    # Fakes answer the realpath probe (-I) with a fixed value and log every pip call.
+    script = '#!/bin/sh\nif [ "$1" = "-I" ]; then echo "REAL"; exit 0; fi\necho "$0 $*" >> "$LOG"\nexit 0\n'
+    cmd = tmp_path / "cmd_python"
+    hook = tmp_path / "hook_python"
+    for p, real in ((cmd, "/real/a"), (hook, "/real/a" if same else "/real/b")):
+        p.write_text(script.replace("REAL", real))
+        p.chmod(0o755)
+    linked.symlink_to(cmd if same else hook)
+    funcs = subprocess.run(
+        ["sed", "-n", "/^pip_requirements() {/,/^}/p;/^install_deps() {/,/^}/p", str(INSTALL_SH)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    body = (
+        f'GREEN=""; YELLOW=""; NC=""; SCRIPT_DIR="{REPO_ROOT}"; PYTHON_CMD="{cmd}"; CLAUDE_DIR="{home}/.claude"\n'
+        f"{funcs}\n"
+        "command() { return 1; }\ninstall_deps\n"
+    )
+    env = {"HOME": str(home), "LOG": str(log), "PATH": "/usr/bin:/bin"}
+    res = subprocess.run(["bash", "-c", body], capture_output=True, text=True, env=env, timeout=60)
+    assert res.returncode == 0, res.stderr
+    return [line for line in log.read_text().splitlines() if "-m pip install -r" in line] if log.exists() else []
+
+
+def test_install_deps_also_installs_into_a_different_hook_python(tmp_path: Path) -> None:
+    calls = _install_deps_harness(tmp_path, same=False)
+    assert len(calls) == 2
+    assert calls[0].startswith(str(tmp_path / "cmd_python")) and calls[1].startswith(
+        str(tmp_path / "h" / ".claude" / "vexjoy" / "bin" / "python3")
+    )
+
+
+def test_install_deps_skips_the_hook_python_when_it_is_the_same_interpreter(tmp_path: Path) -> None:
+    calls = _install_deps_harness(tmp_path, same=True)
+    assert len(calls) == 1 and calls[0].startswith(str(tmp_path / "cmd_python"))

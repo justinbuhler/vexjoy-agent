@@ -29,6 +29,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from scripts.lib.atomic_io import atomic_write_text
 from scripts.lib.frontmatter import extract_frontmatter_block
 
 
@@ -116,10 +117,12 @@ def extract_short_description(description: str) -> str:
     if match:
         return match.group(0)
 
-    # Fallback: first sentence
-    sentences = desc.split(".")
-    if sentences:
-        return sentences[0].strip()
+    # Fallback: first sentence, without its closing period. Same rule as
+    # generate-skill-index.py: a dot followed by a letter, digit or underscore
+    # is part of an identifier (Node.js, PHP 8.x, 1.2), not a sentence end.
+    match = re.match(r"((?:[^.!?]|\.(?=[a-zA-Z0-9_]))+)[.!?]?", desc)
+    if match:
+        return match.group(1).strip()
 
     return description[:100]
 
@@ -262,8 +265,7 @@ def main() -> int:
             index["agents"].update(private_index["agents"])
 
     # Write index file
-    with open(output_path, "w") as f:
-        json.dump(index, f, indent=2)
+    atomic_write_text(output_path, json.dumps(index, indent=2))
 
     # Summary
     print(f"Generated {output_path}")

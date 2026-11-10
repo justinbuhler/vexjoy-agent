@@ -21,15 +21,26 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from vexinstall import adapters, common, fsops, gitutil, profile, sources
+from vexinstall import adapters, common, fsops, gitutil, plan, profile, sources
 from vexinstall import settings as settings_mod
 from vexinstall.adapters import ADAPTERS
 from vexinstall.cli import build_parser, dispatch, to_options
 from vexinstall.context import Result
 
-__all__ = ["ADAPTERS", "adapters", "common", "fsops", "profile", "settings_mod", "sources"]
+__all__ = [
+    "ADAPTERS",
+    "SUPPORT",
+    "TARGETS",
+    "adapters",
+    "common",
+    "fsops",
+    "plan",
+    "profile",
+    "settings_mod",
+    "sources",
+]
 
-TARGETS = ("claude", "codex", "factory", "hermes", "reasonix")
+TARGETS = ("claude", "codex", "factory", "hermes", "reasonix", "antigravity", "cline")
 PUBLIC_SKILLS = {
     "meta": ["alpha", "beta"],
     "process": ["gamma", "delta"],
@@ -91,6 +102,7 @@ def make_repo(path: Path, *, bulk: bool = False) -> Path:
     _w(path / "scripts" / "tool" / "x.py", "# tool x\n")
     _w(path / "scripts" / "codex-hooks-allowlist.txt", "SessionStart:h1.py matcher=startup\nStop:h2.py\n")
     _w(path / "scripts" / "reasonix-hooks-allowlist.txt", "# comment\nUserPromptSubmit:h1.py\n")
+    _w(path / "scripts" / "agy-hooks-allowlist.txt", "SessionStart:h1.py failure=open\nStop:h2.py failure=open\n")
     settings = {
         "attribution": {"commit": "", "pr": ""},
         "hooks": {
@@ -202,13 +214,14 @@ def tree_hash(root: Path, exclude: tuple[str, ...] = ()) -> str:
     h = hashlib.sha256()
     if not root.exists():
         return "absent"
+    skip = {os.path.normpath(e) for e in exclude}  # "a/b" excludes a\b on Windows too
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         rel_dir = os.path.relpath(dirpath, root)
-        dirnames[:] = sorted(d for d in dirnames if os.path.normpath(os.path.join(rel_dir, d)) not in exclude)
+        dirnames[:] = sorted(d for d in dirnames if os.path.normpath(os.path.join(rel_dir, d)) not in skip)
         for name in sorted(dirnames + filenames):
             full = os.path.join(dirpath, name)
             rel = os.path.normpath(os.path.join(rel_dir, name))
-            if rel in exclude:
+            if rel in skip:
                 continue
             h.update(rel.encode() + b"\0")
             if os.path.islink(full):
@@ -233,13 +246,27 @@ def assert_repo_clean(repo: Path) -> None:
     assert status == "", f"fixture repo dirty:\n{status}"
 
 
-def expected_skill_names(target: str, *, overlays: bool = True, bulk: bool = False) -> set[str]:
-    """Flat skill-root names a target should hold after apply."""
-    names = {n for ns in PUBLIC_SKILLS.values() for n in ns} | set(SUPPORT)
+def expected_skill_names(
+    target: str, *, overlays: bool = True, bulk: bool = False, skills_only: bool = False
+) -> set[str]:
+    """Flat skill-root names a target should hold after apply.
+
+    Excludes support dirs for targets whose adapter sets ``no_support=True``
+    (e.g. cline, which ignores dirs without SKILL.md).
+
+    Pass ``skills_only=True`` to exclude support dirs regardless of the target
+    adapter, and to exclude overlay entries that have no SKILL.md (e.g. voice-v2).
+    Use this when asserting against the skills index rather than the filesystem.
+    """
+    names = {n for ns in PUBLIC_SKILLS.values() for n in ns}
+    if not skills_only and not ADAPTERS[target].no_support:
+        names |= set(SUPPORT)
     if bulk:
         names |= set(BULK_SKILLS)
     if overlays:
-        names |= {"private-one", "private-two", "voice-v1", "voice-v2"}
+        names |= {"private-one", "private-two", "voice-v1"}
+        if not skills_only:
+            names |= {"voice-v2"}
     return names
 
 

@@ -64,6 +64,8 @@ a mode, then follow that mode's phases.
 | Help me decide, decision matrix, pros/cons, trade-offs | [Decision Scoring](#decision-scoring) |
 | Critique ideas, devil's advocate, stress test, roast | [Multi-Persona Critique](#multi-persona-critique) |
 
+**Final report.** When the report synthesizes two or more dispatched agents' outputs (Repo Value Analysis, ADR Consultation, Multi-Persona Critique, Codebase Overview deep-dives), run one self-review pass on the draft before delivery: `skills/shared-patterns/report-self-review.md` (separate dispatch, `model: opus`).
+
 ---
 
 ## Read-Only Inspection
@@ -81,11 +83,13 @@ Use read-only tools only.
 
 **Allowed**: `ls`, `find`, `wc`, `du`, `df`, `file`, `stat`, `ps`, `top -bn1`,
 `uptime`, `free`, `pgrep`, `git status/log/diff/show/branch`,
-`sqlite3 "SELECT ..."`, `curl -s` (GET only), `date`, `env`.
+`sqlite3 "SELECT ..."`, `date`, and `curl -s` for a plain GET to a local service
+or a URL the user named (no request body, uploads, auth headers, tokens or cookies).
 
 **Forbidden**: `mkdir`, `rm`, `mv`, `cp`, `touch`, `chmod`, `chown`,
 `git add/commit/push`, file writes, `INSERT/UPDATE/DELETE/DROP`,
-`npm/pip/apt install`, `kill`, `systemctl restart`.
+`npm/pip/apt install`, `kill`, `systemctl restart`, and `env`/`printenv`
+(they print every secret in the environment).
 
 ### Phase 3: REPORT
 
@@ -177,7 +181,7 @@ EXISTS, PARTIAL, or MISSING. Skip with `--quick`.
 Adjust recommendations from audit. Write final report: executive summary,
 comparison table, already-covered, recommendations, verdict, next steps. Clean
 `/tmp/` files. Load `references/repo-value-analysis/phase7-implement-template.md`
-for implementation dispatch.
+for implementation dispatch. Self-review the draft before it ships (see Final report above).
 
 ---
 
@@ -248,6 +252,7 @@ Read agent files from disk. Extract concerns to `adr/{adr-name}/concerns.md`.
 Determine verdict: all PROCEED = strong consensus, any BLOCK = hard block,
 mixed = significant concerns. Write `adr/{adr-name}/synthesis.md`. Issue
 verdict per `references/adr-consultation/consultation-patterns.md`.
+Self-review the synthesis before issuing it (see Final report above).
 
 ---
 
@@ -331,6 +336,7 @@ PROMISING=2, WEAK=1, REJECT=0. Sum per proposal (0-15).
 Generate report using `references/multi-persona-critique/synthesis-template.md`:
 consensus matrix, features to build, worth investigating, disagreements,
 shelve, cross-cutting insights.
+Self-review the draft before presenting it (see Final report above).
 
 For roast-style code critique with HN personas and file:line validation, load
 `references/multi-persona-critique/roast.md`.

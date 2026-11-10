@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hook-version: 1.0.0
+# hook-version: 1.0.4
 """
 SubagentStart Hook: Subagent Warm Start
 
@@ -21,7 +21,27 @@ Design Principles:
 - Caps output at ~4000 chars (~1000 tokens)
 """
 
+import sys  # vexjoy-pyguard
+
+if sys.version_info < (3, 10):  # vexjoy-pyguard advisory
+    import os
+
+    if not os.environ.get("VEXJOY_PYGUARD_REEXEC"):
+        os.environ["VEXJOY_PYGUARD_REEXEC"] = "1"
+        for _d in [*os.environ.get("PATH", "").split(os.pathsep), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
+            for _v in ("14", "13", "12", "11", "10"):
+                _p = os.path.join(_d, "python3." + _v)
+                if _d and "/shims" not in _d and os.access(_p, os.X_OK):
+                    os.execv(_p, [_p, *sys.argv])
+    sys.stderr.write(
+        "[vexjoy] hook %s needs Python 3.10+, got %s (%s); run ./install.sh in vexjoy-agent from a terminal"
+        " outside Claude Code (gated tool calls stay blocked until then)\n"
+        % (__file__.rsplit("/", 1)[-1], sys.version.split()[0], sys.executable)
+    )
+    sys.exit(0)
+
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -35,6 +55,9 @@ from warmstart_lib import gather_context_block
 EVENT_NAME = "SubagentStart"
 
 
+_BYPASS_ENV = "SUBAGENT_START_WARMSTART_BYPASS"
+
+
 def main() -> None:
     """Build the parent-context block and inject it into the subagent.
 
@@ -43,6 +66,11 @@ def main() -> None:
     2. Gather parent session context from on-disk state
     3. Inject via context_output(SubagentStart, ...)
     """
+    if os.environ.get(_BYPASS_ENV) == "1":
+        if os.environ.get("CLAUDE_HOOKS_DEBUG"):
+            print("[subagent-start-warmstart] Bypassed via SUBAGENT_START_WARMSTART_BYPASS=1", file=sys.stderr)
+        sys.exit(0)
+
     try:
         event_data = read_stdin(timeout=2)
         if not event_data:
@@ -52,7 +80,7 @@ def main() -> None:
         if not isinstance(event, dict):
             empty_output(EVENT_NAME).print_and_exit()
 
-        session_id = event.get("session_id") or get_session_id()
+        session_id = get_session_id(event)
         agent_type = str(event.get("agent_type") or "subagent").strip() or "subagent"
 
         context_output(EVENT_NAME, gather_context_block(session_id, agent_type)).print_and_exit()

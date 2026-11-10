@@ -39,6 +39,10 @@ Turn the user's request into `brief.json`. Read [references/brief-writing.md](re
 - Add `"primitives": "radix" | "base" | "aria"` when the project already uses one primitive set.
 - Ask the user only when the surface type (landing page or app) or the audience is unknown. Otherwise decide, and record the assumption.
 
+### Deriving a brief from an existing screen
+
+The planner has no vision input and picks components, not layout. Read the screen (DOM, a screenshot) yourself and write the brief from it: one requirement per region, each with 1 or 2 capabilities and a role written as a verb plus an object. Three capabilities per requirement abstained with `no_compatible_component`; vague roles abstained with `low_fitness`, and verb-plus-object roles selected (data-table 0.94). Layout stays with you in phase 3.
+
 ## 2. Pick
 
 ```bash
@@ -80,8 +84,9 @@ Use the `frontend` skill. Follow this order:
 
 ## 4. Review
 
-Build with [UI design judgment](../../shared-patterns/ui-design-judgment.md) and its [recipes](../../shared-patterns/ui-design-recipes.md). Render the screen and review it with [references/visual-review.md](references/visual-review.md). Use the harness's screenshot tool (Playwright or chrome-devtools MCP). Capture 375, 768, and 1280 px widths in light and dark mode.
+Build with [UI design judgment](../../shared-patterns/ui-design-judgment.md) and its [recipes](../../shared-patterns/ui-design-recipes.md). Render the screen and review it with [references/visual-review.md](references/visual-review.md). Use the harness's screenshot tool (Playwright or chrome-devtools MCP). Capture 375, 768, and 1280 px widths in light and dark mode (set `deviceScaleFactor` 2 for the 375 px shots you send to Jev).
 
+- Send the desktop and mobile screenshots to Jev, one Noul per trait, with the rated reference in the same state. Load [references/jev-images.md](references/jev-images.md) for captures, question set, and code. Image answers steer the review. They do not replace the checklist.
 - Report each finding as a fact with a location: "Primary button in the dialog footer is below the fold at 375 px", not "spacing feels off".
 - Fix code-level findings in code. Put requirement-level findings (a wrong component, the wrong tone) back into `brief.json`, and rerun phase 2.
 - Stop after three review rounds. Report what remains.
@@ -89,4 +94,4 @@ Build with [UI design judgment](../../shared-patterns/ui-design-judgment.md) and
 
 ## Rules for changing the planner
 
-Apply the [Jev production rules](../../shared-patterns/jev-production-lessons.md) to any change in how requests are built or sent. They cover request size, retries by status, and budget checks. Keep the worst-case size test passing: too much context is the most common failure. Read [references/decision-card.md](references/decision-card.md) before you change the model, catalog, rubric, threshold, bounds, failure policy, or promotion status. `references/catalog-v1.json` is kept for reference only.
+Apply the [Jev production rules](../../shared-patterns/jev-production-lessons.md) to any change in how requests are built or sent. They cover request size, retries by status, and budget checks. Keep the worst-case size test passing: too much context is the most common failure. The planner picks among catalog candidates, and Jev leans toward the first option on some inputs: keep candidate order out of the signal (tightest fit first is a code ordering, so test a reversed order on labeled requirements before trusting a pick). Pin a versioned model ID for planner calibration; `jev-latest` moves between versions. Read [references/decision-card.md](references/decision-card.md) before you change the model, catalog, rubric, threshold, bounds, failure policy, or promotion status. `references/catalog-v1.json` is kept for reference only.

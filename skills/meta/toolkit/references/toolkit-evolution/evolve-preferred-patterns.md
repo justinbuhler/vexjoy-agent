@@ -8,7 +8,7 @@ Reference for Phase 3 CRITIQUE (fallback), failure modes, error handling, and co
 
 - **Improving without measuring** -- every change must have a baseline and A/B result. "It looks better" is not evidence.
 - **Merging without validation** -- every winner must pass multi-persona critique (STRONG consensus) AND A/B testing (WIN status) before merge. The validation gates are the review.
-- **Ignoring negative results** -- failed experiments are valuable data. Record them in the learning DB so the same idea is not re-proposed.
+- **Ignoring failed experiments** -- they are valuable data. Record them in the learning DB so the same idea is not re-proposed.
 - **Improving everything at once** -- max 3 implementations per cycle. Focus compounds; scatter dissipates.
 - **Running without diagnosis** -- do not propose solutions without evidence of problems first. Solutions looking for problems create phantom work.
 - **Proposing duplicates** -- always check INDEX.json before proposing a new skill or capability. Extend existing skills when possible.
@@ -59,7 +59,7 @@ Nightly cost at full utilization: ~$45-105/month. Discovery adds ~$0.50-0.75/mon
 
 ## Phase 3 Inline Critique Fallback
 
-Use this when `multi-persona-critique` skill is NOT available. Dispatch 3 parallel agents:
+Use this when the assessment skill (Multi-Persona Critique mode) is NOT available. Dispatch 3 parallel agents:
 
 **Pragmatist**: "You are a pragmatist engineer. Evaluate each proposal on: implementation feasibility, time-to-value, and risk of unintended side effects. Rate each STRONG/MODERATE/WEAK with one sentence of justification."
 

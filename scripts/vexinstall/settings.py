@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .common import SETTINGS_BACKUPS_KEEP, is_inside, realpath, utc_ts
 from .fsops import Guard, atomic_write_bytes, mkdirs
+from .interp import is_repo_only, strip_launcher
 from .legacy import is_legacy_hook_path
 
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
@@ -37,8 +38,11 @@ def expand_vars(text: str, home: Path, extra: dict[str, str] | None = None) -> s
 
 
 def first_path_token(command: str, home: Path) -> str | None:
-    """First shell token of *command* that is a path (contains '/')."""
-    expanded = expand_vars(command, home)
+    """First shell token of *command* that is a path (contains '/').
+
+    The interpreter launcher prefix is skipped, so a launcher command yields its hook path.
+    """
+    expanded = expand_vars(strip_launcher(command), home)
     try:
         tokens = shlex.split(expanded)
     except ValueError:
@@ -75,9 +79,15 @@ class OwnerRule:
         return is_legacy_hook_path(os.path.normpath(tok))
 
 
+# Entry keys that never make two registrations different hooks. A writer that rewrote an account's
+# settings.json without ``description`` made all 74 owned entries read as stale plus missing.
+_COSMETIC_KEYS = frozenset({"description"})
+
+
 def canonical_hash(meta: dict, entry: dict) -> str:
-    """Hash of (group meta, entry) in canonical JSON."""
-    blob = json.dumps({"group": meta, "entry": entry}, sort_keys=True, separators=(",", ":"))
+    """Hash of (group meta, entry) in canonical JSON; cosmetic entry keys are left out."""
+    core = {k: v for k, v in entry.items() if k not in _COSMETIC_KEYS}
+    blob = json.dumps({"group": meta, "entry": core}, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
@@ -102,15 +112,35 @@ class MergeResult:
         return bool(self.added or self.removed or self.deduped)
 
 
+def drop_repo_only(hooks: dict) -> dict:
+    """*hooks* without the repo-only bootstrap entry; groups it empties are dropped."""
+    out: dict = {}
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            out[event] = groups
+            continue
+        kept_groups = []
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                kept_groups.append(group)
+                continue
+            entries = [e for e in group["hooks"] if not (isinstance(e, dict) and is_repo_only(e.get("command")))]
+            if entries:
+                kept_groups.append({**group, "hooks": entries})
+        if kept_groups:
+            out[event] = kept_groups
+    return out
+
+
 def desired_from_repo(source_root: Path) -> dict:
-    """The ``hooks`` key of repo ``.claude/settings.json`` (source of desired entries)."""
+    """The ``hooks`` key of repo ``.claude/settings.json`` (source of desired entries), minus repo-only entries."""
     path = source_root / ".claude" / "settings.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     hooks = data.get("hooks", {})
-    return hooks if isinstance(hooks, dict) else {}
+    return drop_repo_only(hooks) if isinstance(hooks, dict) else {}
 
 
 def desired_env_from_repo(source_root: Path) -> dict[str, str]:
@@ -145,6 +175,43 @@ def remove_retired_env(settings: dict, retired: dict[str, str] = RETIRED_ENV) ->
     return removed
 
 
+SUPERSEDED_ENV: dict[str, tuple[str, ...]] = {
+    # name -> values the installer used to ship; moved to the repo value once per install while it
+    # still holds one. Reverting a default needs its own entry here (new value -> old value).
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": ("400000",),
+}
+
+
+def update_superseded_env(
+    settings: dict,
+    desired_env: dict[str, str],
+    done: set[str],
+    superseded: dict[str, tuple[str, ...]] = SUPERSEDED_ENV,
+) -> tuple[list[str], list[str]]:
+    """Move env vars still on an old shipped default to the repo value in place, once per install.
+
+    *done* holds ``KEY=old`` markers from earlier runs; those are skipped, so a value the user sets
+    after the migration (even an old default) is kept. Returns (``KEY=new`` updates, new markers).
+    """
+    env = settings.get("env")
+    if not isinstance(env, dict):
+        return [], []
+    updated: list[str] = []
+    marked: list[str] = []
+    for key, old_values in superseded.items():
+        new = desired_env.get(key)
+        if new is None:
+            continue
+        pending = [old for old in old_values if f"{key}={old}" not in done]
+        if not pending:
+            continue
+        if env.get(key) in pending and env[key] != new:
+            env[key] = new
+            updated.append(f"{key}={new}")
+        marked.extend(f"{key}={old}" for old in pending)
+    return updated, marked
+
+
 def merge_env(settings: dict, desired_env: dict[str, str]) -> list[str]:
     """Add desired env vars missing from *settings* in place; never overwrite a user value."""
     if not desired_env:
@@ -159,6 +226,57 @@ def merge_env(settings: dict, desired_env: dict[str, str]) -> list[str]:
             env[key] = value
             added.append(f"{key}={value}")
     return added
+
+
+def desired_attribution_from_repo(source_root: Path) -> dict | None:
+    """The ``attribution`` key of repo ``.claude/settings.json``, or None when it has none."""
+    path = source_root / ".claude" / "settings.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = data.get("attribution")
+    return value if isinstance(value, dict) else None
+
+
+def merge_attribution(settings: dict, desired: dict | None) -> bool:
+    """Add the repo ``attribution`` key when *settings* has none; never overwrite a user value."""
+    if desired is None or "attribution" in settings:
+        return False
+    settings["attribution"] = dict(desired)
+    return True
+
+
+@dataclass
+class RepoKeysResult:
+    """Outcome of merging the repo's non-hook keys (env, attribution) into one settings.json."""
+
+    env_added: list[str] = field(default_factory=list)
+    env_updated: list[str] = field(default_factory=list)
+    env_marked: list[str] = field(default_factory=list)
+    env_removed: list[str] = field(default_factory=list)
+    attribution_added: bool = False
+
+    @property
+    def changed(self) -> bool:
+        """True when the merge changed the settings."""
+        return bool(self.env_added or self.env_updated or self.env_removed or self.attribution_added)
+
+
+def merge_repo_keys(settings: dict, source_root: Path, migrated: set[str]) -> RepoKeysResult:
+    """Merge the repo's env vars and attribution into *settings* in place, as an install does.
+
+    Missing env vars are added, an old shipped default in ``SUPERSEDED_ENV`` is moved once (*migrated*
+    holds the markers of earlier runs), retired values are removed, and ``attribution`` is added when
+    absent. A user value is never overwritten otherwise.
+    """
+    desired_env = desired_env_from_repo(source_root)
+    res = RepoKeysResult()
+    res.env_added = merge_env(settings, desired_env)
+    res.env_updated, res.env_marked = update_superseded_env(settings, desired_env, migrated)
+    res.env_removed = remove_retired_env(settings) if desired_env else []
+    res.attribution_added = merge_attribution(settings, desired_attribution_from_repo(source_root))
+    return res
 
 
 def owned_entries(settings: dict, rule: OwnerRule) -> list[tuple[str, dict, dict]]:

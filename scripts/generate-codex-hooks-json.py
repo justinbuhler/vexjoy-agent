@@ -70,8 +70,14 @@ MODE_EVENTS = {
 # production code makes unsupported coverage machine-readable and forces every
 # Claude registration to have a precise reviewed decision.
 UNSUPPORTED_REGISTRATIONS = {
+    ("UserPromptSubmit", "gemini-turn-gate-userprompt.py"): (
+        "Gemini turn gate enforces Turn-1 routing mandate specific to Google AI / Antigravity CLI and is not applicable to Codex."
+    ),
     ("UserPromptSubmit", "pending-advisory-injector-userprompt.py"): (
         "Drains advisories deferred by Claude Stop hooks; Codex Stop hooks report inline, so there is no queue to drain."
+    ),
+    ("PreToolUse", "pretool-routing-gate.py"): (
+        "Turn-1 routing gate enforces routing protocol before tool mutations for Antigravity / Gemini and is not applicable to Codex."
     ),
     ("PreToolUse", "reference-loading-enforcer.py"): (
         "Codex SubagentStart omits the Agent task prompt and tool input this reference injector requires."
@@ -84,6 +90,9 @@ UNSUPPORTED_REGISTRATIONS = {
     ),
     ("PreToolUse", "pretool-dispatch-spec-gate.py"): (
         "Codex SubagentStart does not expose the Agent prompt whose handoff blocks this gate checks."
+    ),
+    ("SessionEnd", "routing-outcome-stop-fallback.py"): (
+        "The adapted Stop entry already resolves Codex routing outcomes; the Codex mirror registers no SessionEnd event."
     ),
     ("PostToolUse", "usage-tracker.py"): (
         "Codex has no PostToolUse surface for Claude Skill or Agent tool invocations tracked here."
@@ -194,11 +203,15 @@ def parse_allowlist(text: str) -> list[dict]:
             }
         )
 
-    seen: set[tuple[str, str]] = set()
+    # One hook may register under two matchers: the unified gate needs a native
+    # Bash entry and an apply_patch entry for its one Claude registration.
+    seen: set[tuple[str, str, str | None]] = set()
     for entry in entries:
-        key = (entry["event"], entry["filename"])
+        key = (entry["event"], entry["filename"], entry["matcher"])
         if key in seen:
-            raise ValueError(f"Duplicate hook registration: {entry['event']}:{entry['filename']}.")
+            raise ValueError(
+                f"Duplicate hook registration: {entry['event']}:{entry['filename']} (matcher={entry['matcher']})."
+            )
         seen.add(key)
 
     return entries

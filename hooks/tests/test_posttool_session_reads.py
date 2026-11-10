@@ -7,12 +7,12 @@ Run with: python3 -m pytest hooks/tests/test_posttool_session_reads.py -v
 
 import importlib.util
 import json
-
-import pytest
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # Import the module under test
@@ -306,6 +306,53 @@ class TestDeduplication:
         assert len(load_entries(tmp_path)) == 2
 
 
+class TestSubagentTagging:
+    """Reads inside a subagent (event carries agent_id) are tagged, not parent reads."""
+
+    def test_subagent_read_is_tagged_with_agent(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _, _, code = run_hook({**read_event("/sub.py"), "agent_id": "agent-7"})
+        assert code == 0
+        assert [(e["path"], e.get("agent")) for e in load_entries(tmp_path)] == [("/sub.py", "agent-7")]
+
+    def test_parent_read_has_no_agent_field(self, tmp_path, monkeypatch):
+        """agent_type alone (main thread under --agent) or a blank agent_id does not mark a subagent."""
+        monkeypatch.chdir(tmp_path)
+        run_hook({**read_event("/main.py"), "agent_type": "reviewer"})
+        run_hook({**read_event("/blank.py"), "agent_id": ""})
+        entries = load_entries(tmp_path)
+        assert [e["path"] for e in entries] == ["/main.py", "/blank.py"]
+        assert all("agent" not in e for e in entries)
+
+    def test_parent_read_upgrades_earlier_subagent_entry(self, tmp_path, monkeypatch):
+        """A main-thread read of a path a subagent logged still counts as a parent read."""
+        monkeypatch.chdir(tmp_path)
+        run_hook({**read_event("/shared.py"), "agent_id": "agent-1"})
+        run_hook(read_event("/other.py"))
+        run_hook(read_event("/shared.py"))
+        entries = load_entries(tmp_path)
+        assert [(e["path"], e.get("agent")) for e in entries] == [("/other.py", None), ("/shared.py", None)]
+
+    def test_subagent_read_keeps_existing_parent_entry(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        run_hook(read_event("/shared.py"))
+        run_hook({**read_event("/shared.py"), "agent_id": "agent-1"})
+        assert [(e["path"], e.get("agent")) for e in load_entries(tmp_path)] == [("/shared.py", None)]
+
+    def test_subagent_bash_read_is_tagged(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "notes.txt").write_text("x")
+        run_hook(
+            {
+                "tool_name": "Bash",
+                "session_id": "sess-1",
+                "agent_id": "agent-2",
+                "tool_input": {"command": "cat notes.txt"},
+            }
+        )
+        assert [(e["path"], e.get("agent")) for e in load_entries(tmp_path)] == [("notes.txt", "agent-2")]
+
+
 # ---------------------------------------------------------------------------
 # Output Format
 # ---------------------------------------------------------------------------
@@ -392,6 +439,86 @@ def test_reads_dir_override_keeps_log_out_of_project(tmp_path, monkeypatch):
     _, _, code = run_hook(read_event("/a.py"))
     assert code == 0
     assert not (project / ".claude").exists()
-    files = list(out.iterdir())
+    files = [f for f in out.iterdir() if f.suffix == ".txt"]  # the .lock sidecar sits beside it
     assert len(files) == 1 and files[0].suffix == ".txt"
     assert json.loads(files[0].read_text().splitlines()[0])["path"] == "/a.py"
+
+
+# ---------------------------------------------------------------------------
+# Concurrent writers (B-11)
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentWriters:
+    """Hooks run in parallel, so several writers share one file.
+
+    The old read-modify-write had no lock and one fixed temp name: writers lost
+    each other's entries and a writer whose temp file was already renamed died
+    with FileNotFoundError.
+    """
+
+    def test_parallel_writers_keep_every_entry(self, tmp_path):
+        writers = 6
+        procs = [
+            subprocess.Popen(
+                [sys.executable, str(HOOK_PATH)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=tmp_path,
+            )
+            for _ in range(writers)
+        ]
+        events = [json.dumps(read_event(f"/project/file-{i}.py")) for i in range(writers)]
+        for proc, event in zip(procs, events):
+            proc.stdin.write(event)
+            proc.stdin.close()
+        for proc in procs:
+            assert proc.wait(timeout=30) == 0
+            assert "HOOK-ERROR" not in proc.stderr.read()
+            proc.stdout.close()
+            proc.stderr.close()
+        paths = sorted(e["path"] for e in load_entries(tmp_path))
+        assert paths == sorted(f"/project/file-{i}.py" for i in range(writers))
+
+    def test_a_held_lock_is_waited_for_then_the_write_goes_ahead(self, tmp_path):
+        """A held lock delays the write by the bounded wait, never forever."""
+        import time
+
+        fcntl = pytest.importorskip("fcntl")
+
+        lock_path = tmp_path / mod.SESSION_READS_LOCK_FILE
+        lock_path.parent.mkdir(parents=True)
+        with open(lock_path, "w") as held:
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+            started = time.monotonic()
+            result = subprocess.run(
+                [sys.executable, str(HOOK_PATH)],
+                input=json.dumps(read_event("/project/held.py")),
+                capture_output=True,
+                text=True,
+                cwd=tmp_path,
+                timeout=30,
+            )
+            elapsed = time.monotonic() - started
+        assert result.returncode == 0
+        assert elapsed >= mod._LOCK_WAIT_SECONDS
+        assert [e["path"] for e in load_entries(tmp_path)] == ["/project/held.py"]
+
+    def test_a_stale_temp_name_does_not_block_the_write(self, tmp_path):
+        """Each write uses its own temp file, so a leftover fixed name cannot break it."""
+        (tmp_path / ".claude" / "session-reads.tmp").mkdir(parents=True)
+        result = subprocess.run(
+            [sys.executable, str(HOOK_PATH)],
+            input=json.dumps(read_event("/project/after-crash.py")),
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            timeout=30,
+        )
+        assert result.returncode == 0
+        assert "HOOK-ERROR" not in result.stderr
+        assert [e["path"] for e in load_entries(tmp_path)] == ["/project/after-crash.py"]
+        leftovers = [p.name for p in (tmp_path / ".claude").iterdir() if p.name.endswith(".tmp") and p.is_file()]
+        assert leftovers == []

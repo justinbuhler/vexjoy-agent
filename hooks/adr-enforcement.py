@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hook-version: 1.0.0
+# hook-version: 1.0.2
 """
 PostToolUse Hook: ADR Compliance Enforcement
 
@@ -12,6 +12,25 @@ Design Principles:
 - Graceful degradation when adr-compliance.py not yet deployed
 - Skips when no active ADR session (.adr-session.json absent)
 """
+
+import sys  # vexjoy-pyguard
+
+if sys.version_info < (3, 10):  # vexjoy-pyguard advisory
+    import os
+
+    if not os.environ.get("VEXJOY_PYGUARD_REEXEC"):
+        os.environ["VEXJOY_PYGUARD_REEXEC"] = "1"
+        for _d in [*os.environ.get("PATH", "").split(os.pathsep), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
+            for _v in ("14", "13", "12", "11", "10"):
+                _p = os.path.join(_d, "python3." + _v)
+                if _d and "/shims" not in _d and os.access(_p, os.X_OK):
+                    os.execv(_p, [_p, *sys.argv])
+    sys.stderr.write(
+        "[vexjoy] hook %s needs Python 3.10+, got %s (%s); run ./install.sh in vexjoy-agent from a terminal"
+        " outside Claude Code (gated tool calls stay blocked until then)\n"
+        % (__file__.rsplit("/", 1)[-1], sys.version.split()[0], sys.executable)
+    )
+    sys.exit(0)
 
 import json
 import os
@@ -47,8 +66,8 @@ _EXCLUDE_PATTERNS = [
 ]
 
 # Reference files used by adr-compliance.py
-_STEP_MENU = "skills/workflow/references/pipeline-scaffolder/references/step-menu.md"
-_SPEC_FORMAT = "skills/workflow/references/pipeline-scaffolder/references/pipeline-spec-format.md"
+_STEP_MENU = "skills/process/workflow/references/pipeline-scaffolder/references/step-menu.md"
+_SPEC_FORMAT = "skills/process/workflow/references/pipeline-scaffolder/references/pipeline-spec-format.md"
 
 
 def _project_root(event: dict) -> Path:
@@ -186,7 +205,15 @@ def format_pass(file_path: str, check_result: dict) -> str:
     return f"[adr-enforcement] COMPLIANCE CHECK: {display_path} — PASS"
 
 
+_BYPASS_ENV = "ADR_ENFORCEMENT_BYPASS"
+
+
 def main() -> None:
+    if os.environ.get(_BYPASS_ENV) == "1":
+        if os.environ.get("CLAUDE_HOOKS_DEBUG"):
+            print("[adr-enforcement] Bypassed via ADR_ENFORCEMENT_BYPASS=1", file=sys.stderr)
+        sys.exit(0)
+
     try:
         # ADR enforcement is opt-in. Set ADR_ENFORCEMENT=1 to enable.
         if os.environ.get("ADR_ENFORCEMENT") != "1":

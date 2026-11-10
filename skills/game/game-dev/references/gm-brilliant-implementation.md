@@ -213,7 +213,7 @@ routes, and authorized contracts are verified, with rollback evidence present.
 
 Collect a privacy-safe post-live delta, distinguish new regressions from prior
 feedback, retain every valid unfinished item, record metric and welfare guards,
-and call the learning skill. Call the Skill tool with `retro`. Report exact live SHA, evidence, decisions, changes, tests,
+and run the `/retro` telemetry report (`commands/retro.md`, a command). Call the Skill tool with `retro`. Report exact live SHA, evidence, decisions, changes, tests,
 release proof, feedback window, and next wave.
 
 For conditional defects and human/volume-dependent evidence, use the binding
@@ -289,7 +289,7 @@ input, output, and spec hashes still match.
 - [CPU Systems Harmony](references/cpu-systems-harmony.md)
 - [Quality gates](references/quality-gates.md)
 - [Anti-rationalization core](../../shared-patterns/anti-rationalization-core.md)
-- `skills/game/game-design/SKILL.md`
-- `skills/process/feature-lifecycle/SKILL.md`
-- `skills/workflow/SKILL.md`
+- `skills/game/game-dev/SKILL.md`
+- `skills/process/workflow/references/fl-pipeline.md`
+- `skills/process/workflow/SKILL.md`
 - `agents/project-coordinator-engineer.md`

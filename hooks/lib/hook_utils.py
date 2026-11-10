@@ -297,13 +297,35 @@ def session_reads_path() -> Path:
     return project / ".claude" / "session-reads.txt"
 
 
-def get_session_id() -> str:
-    """Get session ID from environment or generate a unique fallback.
+def _usable_session_id(value: object) -> Optional[str]:
+    """Return *value* when it can safely name a per-session file, else None.
 
-    Falls back to PPID + timestamp hash if CLAUDE_SESSION_ID is not set.
-    This handles container scenarios where PPID might be 1 (init).
+    Session ids end up in file names (``/tmp/claude-<prefix>-<id>.state``), so
+    an id with a path separator, a control character, or the name ``.``/``..``
+    is not used.
     """
-    session_id = os.environ.get("CLAUDE_SESSION_ID")
+    if not isinstance(value, str) or not value or len(value) > 128 or value in (".", ".."):
+        return None
+    if "/" in value or "\\" in value or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        return None
+    return value
+
+
+def get_session_id(event: Optional[dict] = None) -> str:
+    """Return the session id for per-session state.
+
+    Order: the ``session_id`` in the hook input *event* (Claude Code sends it
+    on every event and never sets ``CLAUDE_SESSION_ID``), then the
+    ``CLAUDE_SESSION_ID`` env var (set by the Codex and Antigravity adapters),
+    then a PPID + hour hash. The hash changes whenever the parent process does,
+    so state keyed on it does not survive across hook calls.
+    """
+    if isinstance(event, dict):
+        session_id = _usable_session_id(event.get("session_id"))
+        if session_id:
+            return session_id
+
+    session_id = _usable_session_id(os.environ.get("CLAUDE_SESSION_ID"))
     if session_id:
         return session_id
 
@@ -318,17 +340,18 @@ def get_session_id() -> str:
     return hashlib.md5(unique_str.encode()).hexdigest()[:12]
 
 
-def get_state_file(prefix: str) -> Path:
+def get_state_file(prefix: str, event: Optional[dict] = None) -> Path:
     """
     Get a session-specific state file path.
 
     Args:
         prefix: Prefix for the state file name
+        event: The parsed hook input, so the file is keyed on its session_id
 
     Returns:
         Path to state file in /tmp
     """
-    session_id = get_session_id()
+    session_id = get_session_id(event)
     return Path(f"/tmp/claude-{prefix}-{session_id}.state")
 
 
@@ -559,6 +582,92 @@ def _redact_secrets(text: str) -> str:
     return _secrets_pattern().sub("<redacted>", text)
 
 
+def _tighten_if_owned(fd: int) -> None:
+    """Set an open file to 0600 when the current user owns it and it is group/other accessible.
+
+    A file owned by someone else is left alone. No-op where uid or fchmod is unavailable.
+    """
+    getuid = getattr(os, "getuid", None)
+    fchmod = getattr(os, "fchmod", None)
+    if getuid is None or fchmod is None:
+        return
+    try:
+        st = os.fstat(fd)
+        if st.st_uid == getuid() and st.st_mode & 0o077:
+            fchmod(fd, 0o600)
+    except OSError:
+        pass
+
+
+def ensure_owner_only_dir(path: Path) -> None:
+    """Create ``path`` (and parents) if missing; the directory itself is created 0700.
+
+    An existing directory is never chmodded.
+    """
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+
+def ensure_owner_only_file(path: Path) -> None:
+    """Create ``path`` as an empty 0600 file if missing, or tighten it to 0600 if the current user owns it.
+
+    For files another library opens itself (SQLite databases): call before the
+    first connect so the database, and the -wal/-shm files SQLite gives the same
+    mode, never exist group- or world-readable. Best-effort: an OSError (read-only
+    file or directory) is left for the caller's own open to report.
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_CREAT, 0o600)
+    except OSError:
+        return
+    try:
+        _tighten_if_owned(fd)
+    finally:
+        os.close(fd)
+
+
+def open_owner_only_append(path: Path, follow_symlinks: bool = True):
+    """Open ``path`` for text append, creating it 0600; an existing file is tightened only if owned.
+
+    The mode is passed to os.open, so a new file is never briefly readable by
+    others, whatever the umask. ``follow_symlinks=False`` refuses a symlink at
+    ``path`` (OSError), for files in shared directories such as /tmp.
+    """
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    if not follow_symlinks:
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        _tighten_if_owned(fd)
+        return os.fdopen(fd, "a", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def hook_debug_enabled() -> bool:
+    """True when CLAUDE_HOOKS_DEBUG is set (the toolkit's hook debugging switch)."""
+    return bool(os.environ.get("CLAUDE_HOOKS_DEBUG"))
+
+
+def append_hook_debug_log(path: Path, line: str) -> None:
+    """Append one line to a hook debug log, only when hook debugging is on.
+
+    The log is created 0600. The log lives in a shared directory (/tmp), so a
+    file another account owns is never written to and a symlink is never
+    followed. Never raises.
+    """
+    if not hook_debug_enabled():
+        return
+    try:
+        with open_owner_only_append(path, follow_symlinks=False) as f:
+            getuid = getattr(os, "getuid", None)
+            if getuid is not None and os.fstat(f.fileno()).st_uid != getuid():
+                return
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
 def hook_error(hook_name: str, exc: BaseException) -> None:
     """Unconditional one-liner to stderr + append to hook-errors.jsonl.
 
@@ -593,8 +702,8 @@ def hook_error(hook_name: str, exc: BaseException) -> None:
             }
         )
         path = _hook_errors_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
+        ensure_owner_only_dir(path.parent)
+        with open_owner_only_append(path) as f:
             f.write(entry + "\n")
     except Exception:
         pass
@@ -604,8 +713,26 @@ def hook_error(hook_name: str, exc: BaseException) -> None:
 # Governance Event Recording (enriched wrapper)
 # =============================================================================
 
-# Per-second dedup: suppress duplicate governance events within the same second.
+# Governance dedup window, in seconds. One event is kept per window for each
+# (session, event type, tool, hook, command head, blocked) combination.
+_GOV_DEDUP_WINDOW_S = 1.0
+
+# In-process fast path only. Each hook invocation is a new process, so the
+# dedup that works across processes is the deterministic event id below.
 _GOV_DEDUP: dict[str, float] = {}
+
+
+def _governance_event_id(window: int, *parts: object) -> str:
+    """The id every process derives for the same governance event in the same window.
+
+    ``governance_events.id`` is the primary key and the insert is ``INSERT OR
+    IGNORE``, so SQLite drops a second process's copy atomically. No extra query
+    runs, and no schema changes.
+    """
+    import hashlib  # lazy: only deny paths record governance events
+
+    digest = hashlib.sha256("\x1f".join(str(p) for p in parts).encode("utf-8", "replace")).hexdigest()[:16]
+    return f"gov-{int(window * _GOV_DEDUP_WINDOW_S * 1000)}-{digest}"
 
 
 def _redact_command_head(command: str, max_len: int = 80) -> str:
@@ -630,19 +757,18 @@ def record_governance(
     Wraps learning_db_v2.record_governance_event with:
     - session_id extracted from event or environment
     - payload with hook name and redacted command head
-    - per-second dedup (suppresses duplicate event_type+tool_name within 1s)
+    - dedup across processes: an identical event (same session, event type, tool,
+      hook, command head, target file, and blocked flag) in the same
+      ``_GOV_DEDUP_WINDOW_S`` window maps to one row. A different session,
+      hook, command, or target file is a different event and is always
+      recorded. The target file comes from the event's ``tool_input``; without
+      it, two blocked edits of different files in one window were one row.
 
-    Never raises. Returns event id on success, None on failure or dedup.
+    Never raises. Returns the event id, or None on failure. A duplicate caught
+    in this process returns None; one caught by the database returns the id of
+    the row already stored.
     """
     try:
-        # Per-second dedup key
-        now = time.time()
-        dedup_key = f"{event_type}:{tool_name}:{hook_name}"
-        last = _GOV_DEDUP.get(dedup_key, 0.0)
-        if now - last < 1.0:
-            return None  # suppressed
-        _GOV_DEDUP[dedup_key] = now
-
         # Extract session_id
         session_id = None
         if event and isinstance(event, dict):
@@ -657,6 +783,30 @@ def record_governance(
         if command:
             payload["command_head"] = _redact_command_head(command)
 
+        # Edit-style tools carry no command: the file is what tells two apart.
+        target = ""
+        tool_input = event.get("tool_input") if isinstance(event, dict) else None
+        if isinstance(tool_input, dict):
+            target = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
+
+        now = time.time()
+        window = int(now // _GOV_DEDUP_WINDOW_S)
+        event_id = _governance_event_id(
+            window,
+            session_id,
+            event_type,
+            tool_name,
+            hook_phase,
+            severity,
+            hook_name,
+            payload.get("command_head", ""),
+            target,
+            int(bool(blocked)),
+        )
+        if _GOV_DEDUP.get(event_id) is not None:
+            return None  # suppressed: this process already recorded it
+        _GOV_DEDUP[event_id] = now
+
         from learning_db_v2 import record_governance_event
 
         return record_governance_event(
@@ -667,6 +817,7 @@ def record_governance(
             severity=severity,
             payload=payload if payload else None,
             blocked=blocked,
+            event_id=event_id,
         )
     except Exception:
         return None

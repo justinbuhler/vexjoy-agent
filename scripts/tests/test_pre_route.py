@@ -231,6 +231,127 @@ class TestSemanticSafety:
         assert "skill:pr-workflow" in candidates
 
 
+class TestTriggerScopedGuards:
+    """pr-workflow idiom guards apply per trigger, through the trigger's own verbs.
+
+    One flat guard set applied to every trigger dropped genuine git requests
+    whenever another family's idiom word sat in the window: "against" (push
+    back against) and "head" (merge ideas in your head) were the common ones.
+    """
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "create a pull request against main",
+            "open a PR against the release branch",
+            "git push origin HEAD",
+            "I pushed the fix, now open a PR",
+            "open a PR to roll back the deploy",
+            "push my branch to origin then open a PR against main",
+        ],
+    )
+    def test_genuine_git_requests_force_route(self, pre_route, real_entries, query: str) -> None:
+        result = pre_route.route(query, entries=real_entries)
+        assert (result["skill"], result["match_type"], result["confidence"]) == (
+            "pr-workflow",
+            "force_route",
+            "high",
+        ), result
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "push back on this",
+            "push back on my changes",  # push family: back
+            "commit these ideas to memory",  # commit family: ideas
+            "merge this in your head",  # merge family: head
+            "the captain will ship this",  # ship family: captain
+            "publish this paper",  # publish family: paper
+            "send my manuscript for review",  # send and review families: manuscript
+            "publish a book this year",  # phrase guard "publish a book" (#993 had made it "content a book")
+            "fish out the bug",
+            "a shared repository of ideas",  # metaphor; the flat "ideas" guard used to catch it
+        ],
+    )
+    def test_idioms_stay_suppressed(self, pre_route, real_entries, query: str) -> None:
+        result = pre_route.route(query, entries=real_entries)
+        assert result["skill"] not in ("pr-workflow", "deploy"), result
+        assert result.get("pipeline") != "pr-pipeline", result
+
+    def test_guard_words_follow_the_trigger_verbs(self, pre_route) -> None:
+        guards = pre_route._verb_guards
+        assert {"back", "against"} <= guards("pr-workflow", "push my changes")
+        assert "head" not in guards("pr-workflow", "git push")
+        assert "head" in guards("pr-workflow", "merge this in")
+        assert "manuscript" in guards("pr-workflow", "send for review")
+        assert guards("pr-workflow", "check ci") == set()
+
+    @pytest.mark.parametrize(
+        "trigger", ["create pull request", "open pr", "push and pr", "merge contributor pr", "pr-fix"]
+    )
+    def test_triggers_that_name_a_pr_carry_no_unigram_guard(self, pre_route, trigger: str) -> None:
+        assert pre_route._verb_guards("pr-workflow", trigger) == set()
+
+    def test_pr_fix_loop_keeps_every_pr_workflow_guard_word(self, pre_route) -> None:
+        pr_words = set().union(*pre_route.TRIGGER_VERB_GUARDS["pr-workflow"].values())
+        assert pr_words <= pre_route.SEMANTIC_GUARDS["pr-fix-loop"]
+
+
+class TestSecurityVocabulary:
+    """Standard vulnerability names force-route to security without an INDEX keyword."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "SQL injection",
+            "check the signup form for SQL injection",
+            "check the comment box for XSS",
+            "look for cross-site scripting in the templates",
+            "add CSRF protection to the login form",
+            "scan the repo for leaked secrets",
+            "review the auth flow for vulnerabilities",
+        ],
+    )
+    def test_vulnerability_vocabulary_force_routes_to_security(self, pre_route, real_entries, query: str) -> None:
+        result = pre_route.route(query, entries=real_entries)
+        assert (result["skill"], result["match_type"], result["confidence"]) == (
+            "security",
+            "force_route",
+            "high",
+        ), result
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "use dependency injection in the service layer",
+            "keep the secrets in my diary",
+            "look for vulnerabilities in my argument",
+            "check my essay for vulnerabilities in its reasoning",
+        ],
+    )
+    def test_near_misses_do_not_route_to_security(self, pre_route, real_entries, query: str) -> None:
+        assert pre_route.route(query, entries=real_entries)["skill"] != "security"
+
+
+class TestDeploySiteWorkGuard:
+    """The words "design" and "redesign" mark work ON a site; #993's design->frontend rename broke both."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "redesign the deploy site",
+            "design a new landing page for my domain",
+            "redesign my public site on my domain",
+        ],
+    )
+    def test_design_work_on_a_site_is_not_a_deploy(self, pre_route, real_entries, query: str) -> None:
+        assert pre_route.route(query, entries=real_entries)["skill"] != "deploy"
+
+    def test_a_frontend_site_still_deploys(self, pre_route, real_entries) -> None:
+        result = pre_route.route("deploy my frontend site to netlify", entries=real_entries)
+        assert (result["skill"], result["match_type"]) == ("deploy", "force_route"), result
+
+
 # ---------------------------------------------------------------------------
 # Output schema tests
 # ---------------------------------------------------------------------------
@@ -289,8 +410,8 @@ class TestConfidence:
         """Force-route with 1 trigger -> high.
 
         A force match that reached scoring already passed every semantic
-        guard; the /do fast path and Step 1(a) safety override act only on
-        "high", so a single surviving force trigger must report it.
+        guard; /do Phase 2 Step 1(a)'s safety override acts only on "high",
+        so a single surviving force trigger must report it.
         """
         match = pre_route.ScoredMatch(
             name="test",
@@ -494,6 +615,49 @@ class TestPipelineForceRoute:
         result = pre_route.route(query, entries=real_entries)
         assert result.get("pipeline") == "pr-pipeline", result
 
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "address review comments on an upstream PR in a repo I don't own",
+            "implement the fixes on these open PRs in someone else's repo",
+            "fix the Copilot comments on my upstream PR",
+            "run the pr fix loop on these PRs",
+            "fix review feedback on my upstream pull request",
+            # The PR lives on the upstream repo, opened from the user's fork:
+            # still a PR in a repo the user does not own.
+            "fix the lint failure on the upstream PR i opened from my fork",
+        ],
+    )
+    def test_pr_fix_loop_matches_fix_work_on_foreign_prs(self, pre_route, real_entries, query: str) -> None:
+        result = pre_route.route(query, entries=real_entries)
+        assert result["matched"] is True, result
+        assert result.get("pipeline") == "pr-fix-loop", result
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "summarize the upstream PR",
+            "review this upstream PR for me",
+            "push back against the upstream PR fix",
+            # Read-only or meta requests about the pipeline itself.
+            "explain how the pr fix loop works",
+            "what does the pr fix loop pipeline do",
+            "update the docs for the pr fix loop pipeline",
+            # Porting upstream changes into the user's own repo.
+            "apply upstream PR changes to my fork",
+            "implement what upstream PR 42 does in our repo",
+            # The toolkit owner's own repo is never foreign.
+            "fix the failing test in the upstream PR in notque/vexjoy-agent",
+            # No foreign-repo signal at all.
+            "fix the failing test in my PR",
+            "fix the failing test in my PR in notque/vexjoy-agent",
+            "update my branch from upstream and resolve the conflicts",
+        ],
+    )
+    def test_pr_fix_loop_needs_a_change_verb(self, pre_route, real_entries, query: str) -> None:
+        result = pre_route.route(query, entries=real_entries)
+        assert result.get("pipeline") != "pr-fix-loop", result
+
     def test_fallthrough_has_pipeline_none(self, pre_route, real_entries) -> None:
         """Fallthrough results include pipeline: None."""
         result = pre_route.route("tell me about quantum physics", entries=real_entries)
@@ -505,3 +669,63 @@ class TestPipelineForceRoute:
         assert result["matched"] is True
         assert result["skill"] == "deploy"
         assert result.get("pipeline") is None
+
+
+class TestSeparatorEquivalence:
+    """A hyphen or underscore between trigger words counts as a space."""
+
+    @pytest.mark.parametrize(
+        "query",
+        ["pr-review this", "pr_review it", "code-review the diff", "pr-review our agent"],
+    )
+    def test_hyphen_underscore_matches_review_force_route(self, pre_route, real_entries, query: str) -> None:
+        result = pre_route.route(query, entries=real_entries)
+        assert result["matched"] is True, result
+        assert result["skill"] == "review"
+        assert result["match_type"] == "force_route"
+
+    def test_spaced_form_still_matches(self, pre_route, real_entries) -> None:
+        result = pre_route.route("pr review our agent", entries=real_entries)
+        assert result["skill"] == "review"
+
+    @pytest.mark.parametrize(
+        ("query", "skill"),
+        [("push back on this design", "pr-workflow"), ("fish for bugs", "deploy")],
+    )
+    def test_idioms_do_not_match(self, pre_route, real_entries, query: str, skill: str) -> None:
+        result = pre_route.route(query, entries=real_entries)
+        assert result.get("skill") != skill, result
+
+
+class TestGameTrailerRoute:
+    """Trailer requests reach game-trailer; plain game building stays on game-dev."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "make a game trailer",
+            "cut a trailer for my game",
+            "edit the trailer for road to aew",
+            "I need a trailer cut of the new build",
+            "make me a trailer for my game",
+        ],
+    )
+    def test_trailer_requests_route_to_game_trailer(self, pre_route, real_entries, query: str) -> None:
+        result = pre_route.route(query, entries=real_entries)
+        assert result["matched"] is True, result
+        assert result["skill"] == "game-trailer"
+        assert result["match_type"] == "force_route"
+
+    @pytest.mark.parametrize("query", ["make a game", "make game levels"])
+    def test_make_game_still_routes_to_game_dev(self, pre_route, real_entries, query: str) -> None:
+        result = pre_route.route(query, entries=real_entries)
+        assert result["skill"] == "game-dev"
+        assert result["match_type"] == "force_route"
+
+    def test_make_game_guard_blocks_only_trailer_requests(self, pre_route, real_entries) -> None:
+        table = pre_route.build_match_table(real_entries)
+        make_game = next(e for e in table if e.name == "game-dev" and e.trigger == "make game")
+        launch = "make a game launch video"
+        trailer = "make a game trailer"
+        assert pre_route._is_semantically_guarded("game-dev", launch, "make game", make_game.pattern) is False
+        assert pre_route._is_semantically_guarded("game-dev", trailer, "make game", make_game.pattern) is True

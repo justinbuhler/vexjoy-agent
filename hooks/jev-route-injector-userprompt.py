@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hook-version: 3.0.0
+# hook-version: 4.0.1
 """
 UserPromptSubmit hook -- pre-run jev-route.py on a /d invocation and inject
 JEV_RESULT before the model generates a single token.
@@ -10,28 +10,46 @@ choosing to comply. This hook runs the script before the model has a choice.
 This hook detects a raw ``/d ...`` invocation at UserPromptSubmit (the
 earliest hook point in the turn, before /d's own instructions are read),
 runs ``scripts/jev-route.py`` itself, and injects the resulting JSON as
-additionalContext. By the time the model's first token for this turn is
-generated, JEV_RESULT already exists in context -- Phase 1 of
-skills/meta/d/SKILL.md then reads it instead of running the script, for
-the case this hook successfully detects and completes in time.
+additionalContext. JEV_RESULT holds the deterministic part of the route: the
+safety force route (pr-workflow, security) when pre-route.py matches one, the
+Jev attachment evidence, and the project facts. The session model picks the
+agent, skill, and pipeline itself in Phase 1 of skills/meta/d/SKILL.md.
 
 Honest limit, not overclaimed: this is real, mechanical enforcement for a
-detected, on-time /d invocation -- the classification happens outside the
-model's control, deterministically, before generation starts. It is NOT
-100%% immunity: an invocation shape the regex below does not recognize, or a
-hook failure/timeout, silently falls through to Phase 1's own prose-driven
-script call (same behavior as before this hook existed) -- this hook fails
-open in every failure mode, it never blocks the prompt. See
-docs/injected-context-contracts.md's ``[jev-route-injector]`` entry for the
-full contract, and skills/meta/d/SKILL.md Phase 1 for how the injected
-result is consumed.
+detected, on-time /d invocation -- the guard and the Jev attachment call
+happen outside the model's control, deterministically, before generation
+starts. It is NOT 100%% immunity: an invocation shape the regex below does
+not recognize, or a hook failure/timeout, silently falls through to Phase 1's
+own prose-driven script call -- this hook fails open in every failure mode,
+it never blocks the prompt. See docs/injected-context-contracts.md's
+``[jev-route-injector]`` entry for the full contract.
 """
+
+import sys  # vexjoy-pyguard
+
+if sys.version_info < (3, 10):  # vexjoy-pyguard advisory
+    import os
+
+    if not os.environ.get("VEXJOY_PYGUARD_REEXEC"):
+        os.environ["VEXJOY_PYGUARD_REEXEC"] = "1"
+        for _d in [*os.environ.get("PATH", "").split(os.pathsep), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
+            for _v in ("14", "13", "12", "11", "10"):
+                _p = os.path.join(_d, "python3." + _v)
+                if _d and "/shims" not in _d and os.access(_p, os.X_OK):
+                    os.execv(_p, [_p, *sys.argv])
+    sys.stderr.write(
+        "[vexjoy] hook %s needs Python 3.10+, got %s (%s); run ./install.sh in vexjoy-agent from a terminal"
+        " outside Claude Code (gated tool calls stay blocked until then)\n"
+        % (__file__.rsplit("/", 1)[-1], sys.version.split()[0], sys.executable)
+    )
+    sys.exit(0)
 
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
@@ -87,7 +105,7 @@ def extract_request_text(prompt: str) -> str | None:
 
 def run_jev_route(request_text: str, session_id: str = "", cwd: str = "") -> dict | None:
     """Run jev-route.py directly (list-argv subprocess -- no shell, so no
-    quoting risk from ``request_text``).
+    quoting risk from ``request_text``, which travels in a temp file).
 
     Returns the parsed JEV_RESULT dict, or None on any failure -- every
     failure path here means "fail open," not "block."
@@ -100,13 +118,19 @@ def run_jev_route(request_text: str, session_id: str = "", cwd: str = "") -> dic
     script = Path(__file__).resolve().parent.parent / "scripts" / "jev-route.py"
     if not script.is_file():
         return None
+    # The prompt goes in a private temp file, not argv: argv is readable by every
+    # local user in `ps`, and a prompt can hold a pasted secret or start with "-".
+    tmp_path: str | None = None
     try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp:
+            tmp.write(request_text)
+            tmp_path = tmp.name
         proc = subprocess.run(
             [
                 sys.executable,
                 str(script),
-                "--request",
-                request_text,
+                "--request-file",
+                tmp_path,
                 "--json-compact",
                 "--timeout",
                 str(JEV_ROUTE_ATTEMPT_TIMEOUT_SECONDS),
@@ -120,6 +144,12 @@ def run_jev_route(request_text: str, session_id: str = "", cwd: str = "") -> dic
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
+    finally:
+        if tmp_path:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except OSError:
+                pass
     if proc.returncode != 0:
         return None
     try:
@@ -134,15 +164,26 @@ def build_injection(jev_result: dict) -> str:
     return (
         "[jev-route-injector] JEV_RESULT precomputed by this hook before your first token this "
         "turn -- do NOT run scripts/jev-route.py again for this request; skills/meta/d/SKILL.md "
-        "Phase 1 gates on this being present. The carried JEV_RESULT.intent_alignment is the "
-        "Phase-1 baseline receipt (JEV_RESULT.intent_alignment) ONLY; it does NOT satisfy Phase 2. "
-        "You MUST still write PROPOSED_INTENT and run scripts/jev-intent-align.py on that text "
-        "before any routing banner or dispatch. JEV_RESULT = "
+        "Phase 1 gates on this being present. It holds the safety force route, the attachment evidence, "
+        "and the project facts. It does NOT pick the agent, skill, or pipeline: you pick them in Phase 1 "
+        "with the /do rules, then run scripts/jev-route.py --finalize. Phase 2 still requires you to write "
+        "PROPOSED_INTENT and run scripts/jev-intent-align.py on that text before any routing banner or "
+        "dispatch. JEV_RESULT = "
         f"{json.dumps(jev_result)}"
     )
 
 
+_BYPASS_ENV = "JEV_ROUTE_INJECTOR_USERPROMPT_BYPASS"
+
+
 def main() -> None:
+    if os.environ.get(_BYPASS_ENV) == "1":
+        if os.environ.get("CLAUDE_HOOKS_DEBUG"):
+            print(
+                "[jev-route-injector-userprompt] Bypassed via JEV_ROUTE_INJECTOR_USERPROMPT_BYPASS=1", file=sys.stderr
+            )
+        sys.exit(0)
+
     raw = read_stdin(timeout=5)
     if not raw or not raw.strip():
         empty_output(EVENT_NAME).print_and_exit()

@@ -30,11 +30,15 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
+from collections.abc import Mapping
+from email.message import Message
 from pathlib import Path
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
+import jev_images
 import jev_limits
 import jev_redact
 
@@ -158,7 +162,8 @@ def _check_breaker() -> int | None:
         file_ts = float(raw.get("ts", 0))
         if (time.time() - file_ts) < ttl:
             file_status = int(raw["status"])
-            _jev_down = (file_status, time.monotonic())
+            # Keep the file's trip time, so reading it does not restart the TTL.
+            _jev_down = (file_status, time.monotonic() - (time.time() - file_ts))
             return file_status
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
         pass
@@ -281,6 +286,68 @@ _inflight: dict[str, threading.Event] = {}
 _inflight_results: dict[str, tuple[dict, float]] = {}
 
 
+# ---------------------------------------------------------------------------
+# Run budget -- every request that reaches the network, on any path
+# ---------------------------------------------------------------------------
+
+# One id per process. A call-log row with no session id carries this, so the
+# tokens one run spent can be totalled from the log.
+RUN_ID = f"run-{uuid.uuid4().hex[:12]}"
+_run_lock = threading.Lock()
+_run_tokens = 0
+_run_warned = False
+
+
+class RunBudgetExceeded(RuntimeError):
+    """``JEV_MAX_RUN_TOKENS`` is set and this request would pass it. Nothing was sent."""
+
+
+def _run_token_cap() -> int | None:
+    """Return the opt-in hard cap on estimated tokens per run (env ``JEV_MAX_RUN_TOKENS``), else None."""
+    raw = os.environ.get("JEV_MAX_RUN_TOKENS", "").strip()
+    try:
+        cap = int(raw)
+    except ValueError:
+        return None
+    return cap if cap > 0 else None
+
+
+def note_run_tokens(tokens: int, *, has_images: bool = False) -> int:
+    """Count one outgoing request's estimated tokens toward this run; return the run total.
+
+    Warns on stderr, with the run id, when one text request passes
+    ``jev_limits.MAX_REQUEST_TOKENS`` (callers that skip ``jev_transport`` get no
+    split) and once when the run passes ``jev_limits.CASCADE_TOKENS_PER_RUN``.
+    With ``JEV_MAX_RUN_TOKENS`` set, raises ``RunBudgetExceeded`` before the
+    request that would pass it.
+    """
+    global _run_tokens, _run_warned
+    if not has_images and tokens > jev_limits.MAX_REQUEST_TOKENS:
+        print(
+            f"[jev-budget] {RUN_ID}: request is ~{tokens} tokens, over the {jev_limits.MAX_REQUEST_TOKENS} "
+            "request limit; send it through jev_transport so it is split",
+            file=sys.stderr,
+        )
+    cap = _run_token_cap()
+    with _run_lock:
+        if cap is not None and _run_tokens + tokens > cap:
+            raise RunBudgetExceeded(
+                f"{RUN_ID}: run would reach ~{_run_tokens + tokens} tokens, over JEV_MAX_RUN_TOKENS={cap}"
+            )
+        _run_tokens += tokens
+        total = _run_tokens
+        warn = total > jev_limits.CASCADE_TOKENS_PER_RUN and not _run_warned
+        if warn:
+            _run_warned = True
+    if warn:
+        print(
+            f"[jev-budget] {RUN_ID}: this run has sent ~{total} tokens, over the "
+            f"{jev_limits.CASCADE_TOKENS_PER_RUN} per-run budget",
+            file=sys.stderr,
+        )
+    return total
+
+
 def _count_call(
     *,
     ok: bool,
@@ -300,7 +367,7 @@ def _count_call(
     usage = (data or {}).get("usage") if isinstance(data, dict) else None
     usage = usage if isinstance(usage, dict) else {}
     try:
-        sid = os.environ.get("JEV_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID")
+        sid = os.environ.get("JEV_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID") or RUN_ID
         agent_id = os.environ.get("JEV_AGENT_ID")
         if sid and agent_id:
             sid = f"{sid}:{agent_id}"
@@ -324,7 +391,22 @@ def _count_call(
 
 TYPESAFE_PLUGIN_KEY = "typesafe@typesafe-ai"
 TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
-JEV_MODEL = "jev-latest"
+JEV_MODEL = "jev-1.14.0"  # pinned 2026-10-16 (owner); gateway pins typesafe-ai/jev-1.14.0
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect: urllib would resend the Authorization header to the new host."""
+
+    def redirect_request(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _open_url(request: urllib.request.Request, timeout: float):
+    """Open one request on the pinned endpoint without following redirects."""
+    return _OPENER.open(request, timeout=timeout)
 
 
 def _read_json_object(path: Path) -> dict:
@@ -411,19 +493,33 @@ def _retry_delay(exc: urllib.error.HTTPError, attempt: int) -> float | None:
     Only HTTP 429 and 529 are retried. The wait doubles each attempt with
     jitter, so parallel callers that failed together do not retry together
     (synchronized retries turn a rate limit into a retry storm). It honors a
-    numeric ``Retry-After`` header as a floor and never exceeds
+    numeric ``retry-after-ms`` or ``Retry-After`` header as a floor and never exceeds
     ``_RETRY_MAX_SLEEP_S`` so a hook's own timeout still bounds the call.
     """
     if exc.code not in _RETRY_CODES or attempt >= _retry_max():
         return None
-    retry_after = None
-    header = exc.headers.get("Retry-After") if exc.headers is not None else None
-    if header:
-        try:
-            retry_after = float(header)
-        except (ValueError, TypeError):
-            pass
+    retry_after = _retry_after_seconds(exc.headers)
     return jev_limits.backoff_delay(attempt, retry_after, rng=_jitter, base=_RETRY_BASE_S, cap=_RETRY_MAX_SLEEP_S)
+
+
+def _retry_after_seconds(headers: Mapping[str, str] | Message | None) -> float | None:
+    """Server-requested wait in seconds: ``retry-after-ms`` first, then numeric ``Retry-After``.
+
+    The TypeSafe SDKs honor both headers. A missing, non-numeric, or negative value is None.
+    """
+    if headers is None:
+        return None
+    for name, scale in (("retry-after-ms", 0.001), ("Retry-After", 1.0)):
+        raw = headers.get(name)
+        if not raw:
+            continue
+        try:
+            value = float(raw) * scale
+        except (ValueError, TypeError):
+            continue
+        if value >= 0:
+            return value
+    return None
 
 
 def _error_kind(exc: urllib.error.HTTPError) -> str:
@@ -444,14 +540,29 @@ def _error_kind(exc: urllib.error.HTTPError) -> str:
     return ""
 
 
+def _asset_refs(payload: dict) -> dict[str, str]:
+    """Part name -> reference for every asset in the payload."""
+    assets = payload.get("assets")
+    if not isinstance(assets, dict):
+        return {}
+    return {str(a.get("part")): ref for ref, a in assets.items() if isinstance(a, dict)}
+
+
 def call_jev(
     payload: dict,
     api_key: str,
     timeout: float,
     *,
     script_name: str | None = None,
+    image_parts: dict[str, tuple[bytes, str]] | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[dict, float]:
     """POST one Jev call. Returns (response_json, latency_ms).
+
+    ``image_parts`` (part name -> ``(bytes, content_type)``) sends the request as
+    multipart with the JSON as part ``request``; the payload's ``assets`` map
+    names the parts. ``extra_headers`` adds headers such as
+    ``TypeSafe-Danger-Zone-Images``. Image bytes are never logged.
 
     Stdlib urllib.request only (no third-party HTTP dependency).
     Raises on any failure; the caller catches broadly and never includes
@@ -467,7 +578,8 @@ def call_jev(
        calls in the same process (and across processes for ``JEV_BREAKER_TTL_S``
        seconds) return the same failure without a network request.
     4. Cache -- on-disk SQLite cache keyed by payload hash with
-       configurable TTL (``JEV_CACHE_TTL_S``, default 120s, 0 disables).
+       configurable TTL (``JEV_CACHE_TTL_S``, default 1800s, 0 disables).
+       Only an answer that passes ``validate_jev_response`` is cached.
     5. In-flight dedupe -- concurrent calls with the same hash wait
        for one in-flight request instead of sending duplicates.
     """
@@ -475,7 +587,20 @@ def call_jev(
     if n_redacted > 0:
         print(f"[jev-redact] {n_redacted} value(s) redacted before send", file=sys.stderr)
 
+    if image_parts:
+        # A redaction pass can rewrite a reference that sits next to a sensitive-looking key;
+        # the API rejects an unreferenced asset, so fail here with a clear cause.
+        text = json.dumps(payload)
+        lost = [name for name, ref in _asset_refs(payload).items() if ref not in text]
+        if lost:
+            raise RuntimeError("image reference lost in redaction; rename the state key that holds it")
+
     phash = _payload_hash(payload)
+    if image_parts:
+        digest = hashlib.sha256()
+        for name in sorted(image_parts):
+            digest.update(name.encode() + hashlib.sha256(image_parts[name][0]).digest())
+        phash = hashlib.sha256((phash + digest.hexdigest()).encode()).hexdigest()[:16]
     n_questions = len(payload.get("questions") or {}) if isinstance(payload.get("questions"), dict) else 0
 
     # --- Circuit breaker ---
@@ -527,7 +652,8 @@ def call_jev(
     if not owner:
         # Wait for the in-flight request to complete.
         event.wait(timeout=timeout + 5.0)
-        result = _inflight_results.pop(phash, None)
+        # Read with get: every waiter needs the result; the owner's cleanup thread removes it.
+        result = _inflight_results.get(phash)
         if result is not None:
             data, latency_ms = result
             _count_call(
@@ -546,19 +672,24 @@ def call_jev(
         # Fallthrough: the owner failed or timed out; make our own request.
 
     # --- Network call ---
-    body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        TYPESAFE_URL,
-        data=body,
-        method="POST",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-    )
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    if image_parts:
+        body, headers["Content-Type"] = jev_images.encode_multipart(payload, image_parts)
+    else:
+        body = json.dumps(payload).encode("utf-8")
+    headers.update(extra_headers or {})
+    request = urllib.request.Request(TYPESAFE_URL, data=body, method="POST", headers=headers)
     start = time.monotonic()
     attempt = 0
     try:
+        # Inside the try: a refused budget still releases the in-flight slot below.
+        questions = payload.get("questions") if isinstance(payload.get("questions"), dict) else {}
+        note_run_tokens(
+            jev_limits.request_tokens(payload.get("state"), questions)["total"], has_images=bool(image_parts)
+        )
         while True:
             try:
-                with urllib.request.urlopen(request, timeout=timeout) as response:
+                with _open_url(request, timeout=timeout) as response:
                     raw = response.read()
                 break
             except urllib.error.HTTPError as exc:
@@ -619,15 +750,21 @@ def call_jev(
         raise
 
     latency_ms = (time.monotonic() - start) * 1000.0
-    data = json.loads(raw.decode("utf-8"))
-    if not isinstance(data, dict) or "answers" not in data:
+    # Parse inside a try: an exception here must still release the in-flight
+    # slot, or every later identical call waits on an event nobody sets.
+    try:
+        data = json.loads(raw.decode("utf-8"))
+        problem = None if isinstance(data, dict) and "answers" in data else "missing answers"
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        data, problem = None, "not JSON"
+    if problem is not None:
         _count_call(
             ok=False,
             latency_ms=latency_ms,
             data=None,
             n_questions=n_questions,
             n_redacted=n_redacted,
-            error="missing answers",
+            error=problem,
             payload_hash=phash,
             script_name=script_name,
         )
@@ -635,12 +772,17 @@ def call_jev(
             with _inflight_lock:
                 _inflight.pop(phash, None)
             event.set()
+        if problem == "not JSON":
+            raise ValueError("Jev response is not JSON")
         raise ValueError("Jev response missing 'answers' key")
 
     # Success: clear breaker, cache, record, and release waiters.
     _clear_breaker()
     answers = data.get("answers", {})
-    _cache_store(phash, answers, data.get("model"))
+    # Cache only an answer that passes validation, so a malformed reply is
+    # never served again for the cache lifetime.
+    if validate_jev_response(data)[0]:
+        _cache_store(phash, answers, data.get("model"))
     aj = _answers_json(data)
     _count_call(
         ok=True,
@@ -709,7 +851,7 @@ def validate_jev_response(data: dict) -> tuple[bool, list[str]]:
             if "noul" in answer:
                 has_type = True
                 val = answer["noul"]
-                if not isinstance(val, (int, float)):
+                if isinstance(val, bool) or not isinstance(val, (int, float)):
                     errors.append(f"{key}: noul is not numeric ({type(val).__name__})")
                 elif not (0.0 <= float(val) <= 1.0):
                     errors.append(f"{key}: noul {val} outside [0, 1]")
@@ -725,7 +867,7 @@ def validate_jev_response(data: dict) -> tuple[bool, list[str]]:
             if "score" in answer:
                 has_type = True
                 val = answer["score"]
-                if not isinstance(val, (int, float)):
+                if isinstance(val, bool) or not isinstance(val, (int, float)):
                     errors.append(f"{key}: score is not numeric ({type(val).__name__})")
 
             if not has_type:
@@ -752,7 +894,7 @@ def validate_jev_response(data: dict) -> tuple[bool, list[str]]:
             # Confidence (optional)
             conf = answer.get("confidence")
             if conf is not None:
-                if not isinstance(conf, (int, float)):
+                if isinstance(conf, bool) or not isinstance(conf, (int, float)):
                     errors.append(f"{key}: confidence is not numeric")
                 elif not (0.0 <= float(conf) <= 1.0):
                     errors.append(f"{key}: confidence {conf} outside [0, 1]")
@@ -770,21 +912,21 @@ def validated_call_jev(
     *,
     script_name: str | None = None,
 ) -> tuple[dict, float]:
-    """Call Jev and validate the response (fail-open).
+    """Call Jev and validate the response (fail-closed).
 
-    Wraps ``call_jev`` with ``validate_jev_response``. Invalid responses
-    log warnings to stderr but still return the data so callers degrade
-    gracefully.
+    Wraps ``call_jev`` with ``validate_jev_response``. An invalid response is
+    logged to stderr and raises ``ValueError``: callers already treat a failed
+    call as "no answer" and take their safe default, so malformed data is never
+    acted on. The message names fields and types only, never response text.
 
     Returns ``(response_json, latency_ms)`` — same as ``call_jev``.
     """
-    import sys
-
     data, latency_ms = call_jev(payload, api_key, timeout, script_name=script_name)
     is_valid, errors = validate_jev_response(data)
     if not is_valid:
         for err in errors[:5]:
             print(f"[jev-validate] WARNING: {err}", file=sys.stderr)
+        raise ValueError("invalid Jev response: " + "; ".join(errors[:5]))
     return data, latency_ms
 
 

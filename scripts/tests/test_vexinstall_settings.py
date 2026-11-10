@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.tests.vexinstall_support import TARGETS, Env, world
+from scripts.tests.vexinstall_support import TARGETS, Env, git, world
 from scripts.tests.vexinstall_support import settings_mod as sm
 
 
@@ -78,6 +78,20 @@ def test_merge_preserves_user_entries_and_collapses_owned(tmp_path: Path) -> Non
     assert sm.duplicate_owned(res.settings, rule) == []
     again = sm.merge(res.settings, desired, rule)
     assert not again.changed
+
+
+def test_merge_ignores_a_dropped_description(tmp_path: Path) -> None:
+    # A writer that rewrites settings.json without the cosmetic description key must not make every
+    # owned entry look stale and missing (an account showed missing=74 stale=74 that way).
+    rule = _rule(tmp_path)
+    full = {**_cmd('python3 "$HOME/.claude/hooks/a.py"'), "description": "does a", "timeout": 5000}
+    bare = {k: v for k, v in full.items() if k != "description"}
+    desired = {"SessionStart": [{"hooks": [full]}]}
+    res = sm.merge({"hooks": {"SessionStart": [{"hooks": [bare]}]}}, desired, rule)
+    assert not res.changed, (res.added, res.removed)
+    assert res.settings["hooks"]["SessionStart"] == [{"hooks": [bare]}]
+    assert sm.canonical_hash({}, full) == sm.canonical_hash({}, bare)
+    assert sm.canonical_hash({}, full) != sm.canonical_hash({}, {**full, "timeout": 6000})
 
 
 @pytest.mark.parametrize("target", ["claude", "codex"])
@@ -168,6 +182,12 @@ def test_repo_settings_disable_prompt_suggestion() -> None:
     assert sm.desired_env_from_repo(root).get("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION") == "false"
 
 
+def test_repo_settings_give_subagents_1h_cache() -> None:
+    # subagents blocking on 5-15 min sims re-wrote their whole context once the 5m cache expired
+    root = Path(__file__).resolve().parents[2]
+    assert sm.desired_env_from_repo(root).get("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL") == "1h"
+
+
 def test_remove_retired_env_only_shipped_value() -> None:
     settings = {"env": {"CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1", "KEEP": "x"}}
     assert sm.remove_retired_env(settings) == ["CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"]
@@ -180,3 +200,79 @@ def test_remove_retired_env_only_shipped_value() -> None:
 def test_repo_settings_do_not_ship_retired_env() -> None:
     root = Path(__file__).resolve().parents[2]
     assert not set(sm.desired_env_from_repo(root)) & set(sm.RETIRED_ENV)
+
+
+def test_repo_settings_auto_compact_500k() -> None:
+    root = Path(__file__).resolve().parents[2]
+    assert sm.desired_env_from_repo(root).get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") == "500000"
+
+
+def test_update_superseded_env_moves_only_old_shipped_value_once() -> None:
+    key = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+    desired = {key: "500000"}
+    marker = f"{key}=400000"
+    settings = {"env": {key: "400000", "KEEP": "x"}}
+    assert sm.update_superseded_env(settings, desired, set()) == ([f"{key}=500000"], [marker])
+    assert settings["env"] == {key: "500000", "KEEP": "x"}
+    # already migrated: a value the user sets afterwards, even the old default, is kept
+    chosen = {"env": {key: "400000"}}
+    assert sm.update_superseded_env(chosen, desired, {marker}) == ([], [])
+    assert chosen["env"][key] == "400000"
+    # a custom value is kept, but the migration is still marked done
+    custom = {"env": {key: "300000"}}
+    assert sm.update_superseded_env(custom, desired, set()) == ([], [marker])
+    assert custom["env"][key] == "300000"
+    # uninstall (no desired env) and a missing env block do nothing
+    assert sm.update_superseded_env({"env": {key: "400000"}}, {}, set()) == ([], [])
+    assert sm.update_superseded_env({}, desired, set()) == ([], [])
+
+
+def test_apply_settings_migrates_old_default_once(world: Env) -> None:
+    key = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+    spath = world.home / ".claude" / "settings.json"
+    spath.write_text(json.dumps({"env": {key: "400000"}}))
+    assert world.run("apply", "--target", "claude").code == 0  # hooks in sync; repo ships no env yet
+    assert json.loads(spath.read_text())["env"][key] == "400000"
+    repo_settings = world.repo / ".claude" / "settings.json"
+    data = json.loads(repo_settings.read_text())
+    data["env"] = {key: "500000"}
+    repo_settings.write_text(json.dumps(data, indent=2))
+    git(world.repo, "commit", "-qam", "ship 500k")
+    assert world.run("apply", "--target", "claude").code == 0  # the env update is the only change
+    assert json.loads(spath.read_text())["env"][key] == "500000"
+    assert f"{key}=400000" in world.ledger()["settings"]["env_migrated"]
+    user = json.loads(spath.read_text())
+    user["env"][key] = "400000"
+    spath.write_text(json.dumps(user))
+    assert world.run("apply", "--target", "claude").code == 0
+    assert json.loads(spath.read_text())["env"][key] == "400000"
+
+
+def test_repo_settings_do_not_ship_superseded_value() -> None:
+    desired = sm.desired_env_from_repo(Path(__file__).resolve().parents[2])
+    for key, old_values in sm.SUPERSEDED_ENV.items():
+        assert desired.get(key) not in old_values
+
+
+def test_apply_settings_adds_attribution_once_and_keeps_user_value(world: Env) -> None:
+    spath = world.home / ".claude" / "settings.json"
+    spath.write_text(json.dumps({"theme": "dark"}))
+    res = world.run("apply", "--target", "claude")
+    assert res.code == 0, res.err
+    assert json.loads(spath.read_text())["attribution"] == {"commit": "", "pr": ""}
+    spath.write_text(json.dumps({**json.loads(spath.read_text()), "attribution": {"commit": "mine", "pr": ""}}))
+    assert world.run("apply", "--target", "claude").code == 0
+    assert json.loads(spath.read_text())["attribution"] == {"commit": "mine", "pr": ""}
+
+
+def test_merge_attribution_adds_only_when_absent() -> None:
+    settings: dict = {}
+    assert sm.merge_attribution(settings, {"commit": "", "pr": ""})
+    assert settings == {"attribution": {"commit": "", "pr": ""}}
+    assert not sm.merge_attribution(settings, {"commit": "x", "pr": "x"})
+    assert not sm.merge_attribution({}, None)
+
+
+def test_repo_settings_ship_empty_attribution() -> None:
+    root = Path(__file__).resolve().parents[2]
+    assert sm.desired_attribution_from_repo(root) == {"commit": "", "pr": ""}

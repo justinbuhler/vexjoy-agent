@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hook-version: 2.1.0
+# hook-version: 2.1.3
 """
 PreToolUse Hook: Subagent Warm Start (superseded)
 
@@ -16,6 +16,7 @@ Design Principles:
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -45,15 +46,23 @@ from warmstart_lib import (  # re-exported for tests and callers
 EVENT_NAME = "PreToolUse"
 
 
+_BYPASS_ENV = "PRETOOL_SUBAGENT_WARMSTART_BYPASS"
+
+
 def main() -> None:
     """Emit the parent-context block on PreToolUse:Agent (lands in the parent)."""
+    if os.environ.get(_BYPASS_ENV) == "1":
+        if os.environ.get("CLAUDE_HOOKS_DEBUG"):
+            print("[pretool-subagent-warmstart] Bypassed via PRETOOL_SUBAGENT_WARMSTART_BYPASS=1", file=sys.stderr)
+        sys.exit(0)
+
     try:
         event_data = read_stdin(timeout=2)
         if not event_data:
             return
 
         event = json.loads(event_data)
-        session_id = event.get("session_id") or get_session_id()
+        session_id = get_session_id(event)
         context_output(EVENT_NAME, gather_context_block(session_id)).print_and_exit()
 
     except Exception as e:

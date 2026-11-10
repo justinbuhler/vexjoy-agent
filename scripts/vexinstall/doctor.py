@@ -7,7 +7,8 @@ import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from . import gitutil
+from . import accounts as accounts_mod
+from . import githooks, gitutil, interp
 from . import index as index_mod
 from . import settings as settings_mod
 from .adapters import resolve_targets
@@ -224,6 +225,38 @@ def _check_settings(ctx: Context, findings: list[Finding]) -> None:
             )
 
 
+def _check_python(ctx: Context, findings: list[Finding]) -> None:
+    """Interpreter drift: the hook python link is missing, dangling, or older than 3.10."""
+    link = str(interp.link_path(ctx.home))
+    for check, detail in interp.drift(ctx.home):
+        findings.append(Finding(ERROR, check, "claude", link, detail))
+    if not interp.drift(ctx.home):
+        missing = interp.missing_modules(ctx.home)
+        if missing:
+            detail = (
+                f"hook python cannot import {', '.join(missing)}; rerun ./install.sh or pip install -r requirements.txt"
+            )
+            findings.append(Finding(WARN, "python-deps-missing", "claude", link, detail))
+
+
+def _check_accounts(ctx: Context, findings: list[Finding]) -> None:
+    for plan in accounts_mod.plan_all(ctx):
+        spath = str(plan.settings_path)
+        for entry in plan.links_add:
+            findings.append(Finding(ERROR, "account-link-missing", "claude", str(plan.config_dir / entry), plan.name))
+        for problem in plan.problems:
+            findings.append(Finding(ERROR, "account-link-conflict", "claude", str(plan.config_dir), problem))
+        if plan.settings_error:
+            findings.append(Finding(ERROR, "account-settings-unreadable", "claude", spath, plan.settings_error))
+        elif plan.merge is not None and plan.merge.changed:
+            m = plan.merge
+            detail = f"{plan.name}: missing={len(m.added)} stale={len(m.removed) + len(m.deduped)}"
+            findings.append(Finding(ERROR, "account-hooks-drift", "claude", spath, detail))
+        if not plan.settings_error and plan.keys is not None and plan.keys.changed:
+            detail = f"{plan.name}: {accounts_mod.keys_summary(plan.keys)}"
+            findings.append(Finding(ERROR, "account-settings-drift", "claude", spath, detail))
+
+
 def _check_repo(ctx: Context, findings: list[Finding]) -> None:
     repo = ctx.source_root
     for line in gitutil.status_porcelain(repo):
@@ -235,6 +268,13 @@ def _check_repo(ctx: Context, findings: list[Finding]) -> None:
     for sub in ("skills/INDEX.local.json", "agents/INDEX.local.json"):
         if sub in set(gitutil.tracked_files(repo)):
             findings.append(Finding(ERROR, "repo-tracked-local-index", "repo", sub))
+
+
+def _check_git_hooks(ctx: Context, findings: list[Finding]) -> None:
+    """Pre-engine post-merge in the hooks dir git uses. Report only: the repo guard forbids rewriting it."""
+    found = githooks.find_legacy_post_merge(ctx.source_root)
+    if found is not None:
+        findings.append(Finding(ERROR, "legacy-git-hook", "repo", str(found.path), found.advice))
 
 
 def run_doctor(opts: Options) -> Result:
@@ -258,7 +298,10 @@ def run_doctor(opts: Options) -> Result:
     if "claude" in targets:
         _check_scan_roots(ctx, findings)
         _check_settings(ctx, findings)
+        _check_python(ctx, findings)
+        _check_accounts(ctx, findings)
     _check_repo(ctx, findings)
+    _check_git_hooks(ctx, findings)
     errors = sum(1 for f in findings if f.level == ERROR)
     warns = sum(1 for f in findings if f.level == WARN)
     out = [f"[doctor] {errors} error(s), {warns} warning(s) across {', '.join(targets)}"]

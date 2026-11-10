@@ -179,6 +179,8 @@ Run the core doc's section 10 loop on the rendered page. This is the final step 
 Generate single self-contained `.html` files. All CSS in `<style>`, all JS in
 `<script>`. No CDN links, no frameworks, no external deps. Max 500KB.
 
+**Local files only.** Write the page to disk and open it in Google Chrome. Do not call the Artifact tool (publish or quickstart), the Claude Docs connector, or ArtifactData unless the user explicitly asks for a Claude Artifact by name. This rule overrides the Artifact tool's guidance to publish pages, reports, boards, and dashboards. For metrics dashboards, use Perses instead of a page.
+
 ### Phase 0: Check Saved Template
 
 Run: `python3 ${CLAUDE_SKILL_DIR}/scripts-html-artifact/fill-template.py --list`
@@ -206,11 +208,11 @@ Low confidence falls back to report. Hybrid shapes: primary controls layout, sec
 
 Run: `python3 ${CLAUDE_SKILL_DIR}/scripts-html-artifact/assemble-template.py --shape {shape} --title "{title}" --components {components}`
 
-Load `references/html-artifact-refs/design-system.md`. For diagram shapes, also load `references/html-artifact-refs/shape-diagram-illustration.md` and `references/html-artifact-refs/diagram-layering.md`. Per-shape must-include rules live in `agents/html-builder.md`.
+Load `references/html-artifact-refs/design-system.md`. Headings must use Archivo Black (embedded `templates/fonts/archivo-black.css`, weight 400, `font-synthesis: none`). The assembler injects it; hand-written artifacts inline that file rather than linking Google Fonts. `validate-artifact.py` errors without it. For diagram shapes, also load `references/html-artifact-refs/shape-diagram-illustration.md` and `references/html-artifact-refs/diagram-layering.md`. Per-shape must-include rules live in `agents/html-builder.md`.
 
 ### Phase 3: Generate
 
-Dispatch html-builder agent (see `agents/html-builder.md`) with pre-assembled template. Vanilla JS only. Semantic HTML. SVG inline.
+Dispatch a subagent whose prompt is `agents/html-builder.md` (a prompt file in this skill, not a registered agent type) with the pre-assembled template. Vanilla JS only. Semantic HTML. SVG inline.
 
 ### Phase 4: Validate, then look
 
@@ -219,7 +221,7 @@ Dispatch html-builder agent (see `agents/html-builder.md`) with pre-assembled te
 
 ### Phase 5: Deliver
 
-Print absolute file path, 1-line summary, offer browser open. Check `$DISPLAY`/`$SSH_TTY` before offering open on Linux.
+Open the file in Google Chrome: `open -a "Google Chrome" <file>` on macOS, `google-chrome <file>` on Linux (check `$DISPLAY`/`$SSH_TTY` first; skip opening over SSH). Print the absolute file path and a 1-line summary. Do not publish it as a Claude Artifact.
 
 ### Phase 6-7: Export (optional)
 

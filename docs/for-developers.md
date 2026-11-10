@@ -37,8 +37,6 @@ scripts/             Deterministic CLI tools. Python scripts for mechanical oper
 
 commands/            Slash command definitions
 
-templates/           Scaffolding templates for new components
-
 adr/                 Architecture Decision Records (gitignored, local working documents)
 ```
 
@@ -67,7 +65,7 @@ git add -A && git commit -m "initial private skills"
 
 At session start, the sync hook deploys each category child containing `SKILL.md` to `~/.claude/skills/`; deleting that source directory removes the deployed copy on the next sync. Private and public skills follow the same conventions.
 
-`hooks/pretool-private-name-leak-gate.py` blocks commits, pushes, and PR text that name a private component. It also blocks brand terms (a first name segment shared by two or more private components) and any term listed in `~/private-skills/.private-terms` (one per line, `#` comments), even when the term already appears on `main`. To check the whole tracked tree for the same terms, run `python3 scripts/private-term-audit.py`. It prints matching paths with the term redacted and exits 1 on any hit. Both read `~/private-skills`, or `~/pgh/private-skills` when that is where the repo lives, and no-op on machines with neither, such as CI.
+`hooks/pretool-private-name-leak-gate.py` blocks commits, pushes, and PR text that name a private component. It also blocks brand terms (a first name segment shared by two or more private components) and any term listed in `~/private-skills/.private-terms` (one per line, `#` comments), even when the term already appears on `main`. To check the whole tracked tree for the same terms, run `python3 scripts/private-term-audit.py`. It prints matching paths with the term redacted and exits 1 on any hit. Both read `~/private-skills`, or `~/pgh/private-skills` when that is where the repo lives, and no-op on machines with neither, such as CI. The gate allows a match when every repo the text can reach is a private GitHub repo: the remote a `git push` targets, every remote for `git commit` and `gh pr`, or the `gh pr --repo` value. It asks `gh api repos/OWNER/REPO` only after a match, and treats no remote, a non-GitHub URL, or a `gh` error as public. `private-term-audit.py` still reports every hit.
 
 ## Creating Components
 
@@ -116,22 +114,21 @@ The full cycle:
 2. **Implement** changes
 3. **Review** using the risk-selected lane in `pr-workflow`
 4. **Fix** confirmed findings and rerun affected checks
-5. **Record** any dead end in `docs/what-didnt-work.md` with its evidence location
-6. **Edit** the agent or skill file yourself when a finding should change behavior
-7. **Commit** in conventional format
-8. **Push** to remote with tracking
-9. **PR** creation via `gh pr create`
-10. **CI** must pass
-11. **Merge** after CI, required review, and authorization
+5. **Edit** the agent or skill file yourself when a finding should change behavior
+6. **Commit** with one lowercase past-tense sentence (see Key Conventions)
+7. **Push** to remote with tracking
+8. **PR** creation via `gh pr create`
+9. **CI** must pass
+10. **Merge** after CI, required review, and authorization
 
-The `pr-workflow` skill automates steps 3 through 10.
+The `pr-workflow` skill automates steps 3 through 9.
 
 ## Testing
 
 Framework: pytest.
 
 ```bash
-pytest -v                            # all tests
+pytest -v                            # fast tier; the default markers skip slow, integration, and performance tests
 pytest hooks/tests/ -v               # hook tests
 pytest scripts/tests/ -v             # script tests
 pytest hooks/tests/test_routing_decision_recorder.py -v   # single file
@@ -149,15 +146,19 @@ Fixtures: `scripts/tests/fixtures/` for script test data. Hook tests inline thei
 
 ## Key Conventions
 
-**Conventional commits.** Use `type(scope): description`; types are feat, fix, refactor, docs, test, and chore. Focus on what and why.
+**Commit messages.** One lowercase past-tense sentence saying what changed and why, with no type prefix and no trailing period. The full rule is in [AGENTS.md](../AGENTS.md) (Writing style).
 
-**No AI attribution.** Omit "Generated with Claude Code" and co-author lines from all commits.
+**Attribution.** No "Generated with Claude Code" or `Co-Authored-By` lines; the repo's `.claude/settings.json` sets `attribution` to empty strings. Trailer lines such as `Claude-Session: <url>` are allowed after a blank line.
 
 **Branch safety.** Create feature branches for all work. The `pretool-branch-safety.py` hook enforces this by blocking commits to protected branches.
 
-**Wabi-sabi in docs.** Sentence fragments where they're clear. Varied length. No "delve", "leverage", "comprehensive", "robust", "streamline", "empower." The `scripts/scan-ai-patterns.py` script catches these.
+**Review before push.** In any repo that is not a non-fork `github.com/notque` repo, `pretool-review-before-push-gate.py` blocks `git push`, `git subtree push`, `gh pr create`, and `gh pr edit --base` until `/pr-review` has recorded the commit with `scripts/review-record.py mark`. Each fix commit needs its own review. Title, body, and label edits and `gh pr ready` pass. Not caught: git aliases (`git p`), nested `$( $(...) )` substitutions, and PR creation through `gh api`. Commands it cannot judge (an unresolvable `cd` or `GIT_DIR` target, `git $SUB push`) are denied. It fails closed on purpose: a notque repo that also has a mirror or colleague remote, or an origin that uses an ssh host alias, counts as not mine and needs a review.
 
-**INDEX.json is generated.** Run the generation scripts. They parse frontmatter and build the index. Hand-edits get overwritten.
+**Wabi-sabi in docs.** Sentence fragments where they're clear. Varied length. No "delve", "robust", "streamline", or "empower"; the full list is `scripts/data/banned-patterns.json`. The `scripts/scan-ai-patterns.py` script catches these.
+
+**INDEX.json is generated.** Run the generation scripts. They parse frontmatter and build the index. Hand-edits get overwritten. A script that reads an index calls `ensure_fresh_indexes` in `scripts/lib/index_freshness.py` first: it regenerates an index that is missing or older than its sources, so a local check matches CI.
+
+**Agent descriptions stay at or under 300 bytes.** Claude Code loads every agent description into each session, so a long one costs tokens on every turn. `scripts/validate-skill-frontmatter.py` fails an `agents/*.md` description over 300 bytes or one that holds an `<example>` block.
 
 **Hooks live in hooks/.** Write there. The sync hook deploys to `~/.claude/hooks/` on session start.
 
@@ -174,7 +175,11 @@ python3 scripts/manage-accounts.py list
 python3 scripts/manage-accounts.py check
 ```
 
-The `add` command registers the account, creates the config dir, links its `skills/`, `agents/`, and `commands/` to `~/.claude` (where `./install.sh` installs everything once), and writes shell aliases that launch `claude --dangerously-skip-permissions --system-prompt="."`. Run `manage-accounts.py link` to repair older accounts. After `add`, log in once per account:
+The `add` command registers the account, creates the config dir, links its `skills/`, `agents/`, and `commands/` to `~/.claude` (where `./install.sh` installs everything once), and writes shell aliases that launch `claude --dangerously-skip-permissions --chrome --system-prompt="."`. Run `manage-accounts.py link` to repair older accounts.
+
+Know what those flags do before you use the aliases. `--dangerously-skip-permissions` runs every tool call without a permission prompt, so you no longer approve file edits, shell commands, or network calls; only blocking hooks (and a sandbox, if you configured one) can stop one. `--chrome` connects the session to your Chrome browser. `--system-prompt="."` replaces Claude Code's built-in system prompt (see the README's Token-saving mode).
+
+After `add`, log in once per account:
 
 ```bash
 CLAUDE_CONFIG_DIR=~/.claude-accounts/work claude

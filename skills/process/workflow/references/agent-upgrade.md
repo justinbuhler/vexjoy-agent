@@ -47,7 +47,7 @@ multi-component changes driven by external events.
 # Common target patterns:
 agents/golang-general-engineer.md
 agents/python-general-engineer.md
-skills/engineering/go-patterns/SKILL.md
+skills/programming/programming/SKILL.md
 ```
 
 If the user names an agent without a path, resolve it:
@@ -56,15 +56,14 @@ ls agents/ | grep [name]
 ls skills/ | grep [name]
 ```
 
-**Step 2**: Call the Skill tool with `agent-evaluation`. Evaluate the target file to get the baseline score (0–100) and grade (A/B/C/F).
+**Step 2**: Call the Skill tool with `toolkit` and run its Agent Evaluation mode. Evaluate the target file to get the baseline score (0–100) and grade (A/B/C/F).
 For ordinary maintenance, record the existing behavior, relevant requirements, and checks instead of a model score.
 
-**Step 3**: Read the telemetry and the registry for this agent:
+**Step 3**: Read the telemetry for this agent:
 ```bash
 python3 ~/.claude/scripts/learning-db.py route-stats --by agent 2>/dev/null || echo "No routing telemetry available"
-grep -n -i "[agent-name]" docs/what-didnt-work.md 2>/dev/null || echo "No recorded negative results"
 ```
-A high error rate names a gap worth fixing; a registry entry names a fix already tried and refuted.
+A high error rate names a gap worth fixing.
 
 **Step 4**: Check for staleness markers in the target file:
 - Missing frontmatter fields: `context`, `model`, `user-invocable` (for skills)
@@ -98,7 +97,7 @@ Retro candidates: [N found | none]
 **Step 1**: Compare target against the agent template structure. Read the template:
 ```bash
 # Read the agent template
-cat skills/meta/skill-creator/references/agent-template.md | head -50
+cat skills/meta/toolkit/references/skill-creator/agent-template.md | head -50
 ```
 
 Check for required sections. For agents:
@@ -186,7 +185,7 @@ CRITICAL (must fix):
 
 IMPORTANT (should fix):
   3. Embed telemetry finding: "[finding summary]" → new Hardcoded behavior [~10min]
-  4. Add missing frontmatter field: `model: sonnet` [~2min]
+  4. Remove out-of-policy frontmatter pin `model: sonnet` so the agent inherits (or pin `opus`) [~2min]
 
 MINOR (nice to have):
   5. Align "What This Agent CANNOT Do" wording to peer style [~5min]
@@ -251,7 +250,7 @@ If joy-check flags lines in EXISTING content (not modified by this upgrade):
 
 **Goal**: Score the updated agent and compute quality delta.
 
-**Step 1**: Call the Skill tool with `agent-evaluation`. Evaluate the modified file and record the after score and grade.
+**Step 1**: Call the Skill tool with `toolkit` and run its Agent Evaluation mode. Evaluate the modified file and record the after score and grade.
 
 **Step 2**: Compute delta:
 ```
@@ -299,7 +298,7 @@ Cause: The agent has carried no routed dispatches, or telemetry is not populated
 Solution: Proceed on the evaluation baseline alone and note the gap in the diff report. An agent with zero routes over a long window is a retirement candidate, not just an upgrade candidate.
 
 ### Error: "Agent template not found in repository"
-Cause: Template file not at expected path (`skills/meta/skill-creator/references/agent-template.md`).
+Cause: Template file not at expected path (`skills/meta/toolkit/references/skill-creator/agent-template.md`).
 Solution: Use the highest-scoring agent (from recent agent-evaluation runs or MEMORY.md) as the de facto template for structural comparison. Note the substitution in the diff report.
 
 ### Error: "Regression detected in Phase 5 (delta is negative)"

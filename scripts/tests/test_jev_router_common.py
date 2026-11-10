@@ -94,7 +94,7 @@ class TestCallJevRedaction:
             resp.__exit__.return_value = False
             return resp
 
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch.object(common, "_open_url", side_effect=fake_urlopen):
             data, _latency = common.call_jev(payload, "fake-api-key-not-real", timeout=1.0)
 
         body = sent["body"].decode("utf-8")
@@ -118,7 +118,7 @@ class TestCallJevRedaction:
             resp.__exit__.return_value = False
             return resp
 
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch.object(common, "_open_url", side_effect=fake_urlopen):
             common.call_jev({"state": {"text": "hello"}, "questions": []}, "fake-api-key-not-real", timeout=1.0)
         assert "[jev-redact]" not in capsys.readouterr().err
 
@@ -217,7 +217,7 @@ class TestCache:
 
         with (
             patch.dict(os.environ, {"JEV_CACHE_TTL_S": "120"}),
-            patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            patch.object(common, "_open_url", side_effect=fake_urlopen),
         ):
             data1, lat1 = common.call_jev({"state": {}, "questions": {"q": {}}}, "fk", timeout=5.0)
             data2, lat2 = common.call_jev({"state": {}, "questions": {"q": {}}}, "fk", timeout=5.0)
@@ -234,7 +234,7 @@ class TestCache:
 
         with (
             patch.dict(os.environ, {"JEV_CACHE_TTL_S": "120"}),
-            patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            patch.object(common, "_open_url", side_effect=fake_urlopen),
         ):
             common.call_jev({"state": {"a": 1}, "questions": {"q": {}}}, "fk", timeout=5.0)
             common.call_jev({"state": {"a": 2}, "questions": {"q": {}}}, "fk", timeout=5.0)
@@ -247,7 +247,7 @@ class TestCache:
 
         with (
             patch.dict(os.environ, {"JEV_CACHE_TTL_S": "0.1"}),
-            patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            patch.object(common, "_open_url", side_effect=fake_urlopen),
         ):
             common.call_jev({"state": {}, "questions": {"q": {}}}, "fk", timeout=5.0)
             time.sleep(0.15)
@@ -261,7 +261,7 @@ class TestCache:
 
         with (
             patch.dict(os.environ, {"JEV_CACHE_TTL_S": "0"}),
-            patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            patch.object(common, "_open_url", side_effect=fake_urlopen),
         ):
             common.call_jev({"state": {}, "questions": {"q": {}}}, "fk", timeout=5.0)
             common.call_jev({"state": {}, "questions": {"q": {}}}, "fk", timeout=5.0)
@@ -278,7 +278,7 @@ class TestCircuitBreaker:
 
         with (
             patch.dict(os.environ, {"JEV_CACHE_TTL_S": "0", "JEV_BREAKER_TTL_S": "60"}),
-            patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            patch.object(common, "_open_url", side_effect=fake_urlopen),
         ):
             with pytest.raises(RuntimeError, match="HTTP 402"):
                 common.call_jev({"state": {}, "questions": {}}, "fk", timeout=5.0)
@@ -295,7 +295,7 @@ class TestCircuitBreaker:
 
         with (
             patch.dict(os.environ, {"JEV_CACHE_TTL_S": "0", "JEV_BREAKER_TTL_S": "60"}),
-            patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            patch.object(common, "_open_url", side_effect=fake_urlopen),
             pytest.raises(RuntimeError),
         ):
             common.call_jev({"state": {}, "questions": {}}, "fk", timeout=5.0)
@@ -332,7 +332,7 @@ class TestCircuitBreaker:
 
         with (
             patch.dict(os.environ, {"JEV_CACHE_TTL_S": "0", "JEV_BREAKER_TTL_S": "0.1"}),
-            patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            patch.object(common, "_open_url", side_effect=fake_urlopen),
         ):
             with pytest.raises(RuntimeError, match="HTTP 402"):
                 common.call_jev({"state": {}, "questions": {"q": {}}}, "fk", timeout=5.0)
@@ -344,6 +344,17 @@ class TestCircuitBreaker:
 
         assert call_count["n"] == 2
         assert data["answers"]["q"]["noul"] == 0.5
+
+    def test_breaker_read_from_file_keeps_its_original_expiry(self) -> None:
+        """A breaker another process tripped 50 s ago (TTL 60) expires 10 s from now, not 60."""
+        common._breaker_path().write_text(json.dumps({"status": 402, "ts": time.time() - 50}), encoding="utf-8")
+        common._jev_down = None
+        with patch.dict(os.environ, {"JEV_BREAKER_TTL_S": "60"}):
+            assert common._check_breaker() == 402
+            common._breaker_path().unlink()  # only the in-process copy is left
+            real = time.monotonic()
+            with patch.object(common.time, "monotonic", return_value=real + 15):
+                assert common._check_breaker() is None
 
     def test_success_clears_breaker(self) -> None:
         """A 2xx response clears the breaker file."""
@@ -359,7 +370,7 @@ class TestCircuitBreaker:
 
         with (
             patch.dict(os.environ, {"JEV_CACHE_TTL_S": "0", "JEV_BREAKER_TTL_S": "0"}),
-            patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            patch.object(common, "_open_url", side_effect=fake_urlopen),
         ):
             data, _ = common.call_jev({"state": {}, "questions": {"q": {}}}, "fk", timeout=5.0)
 
@@ -373,7 +384,7 @@ class TestCircuitBreaker:
 
         with (
             patch.dict(os.environ, {"JEV_CACHE_TTL_S": "0", "JEV_BREAKER_TTL_S": "0"}),
-            patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            patch.object(common, "_open_url", side_effect=fake_urlopen),
         ):
             with pytest.raises(RuntimeError, match="HTTP 402"):
                 common.call_jev({"state": {}, "questions": {}}, "fk", timeout=5.0)
@@ -544,8 +555,8 @@ class TestCountCallSessionId:
 
     @patch.dict("os.environ", {}, clear=False)
     @patch.object(common, "_record_jev_call")
-    def test_no_env_vars_gives_none(self, mock_record):
-        """No session env vars -> session_id is None."""
+    def test_no_env_vars_gives_the_run_id(self, mock_record):
+        """No session env vars -> session_id is this process's run id, so a run can be totalled."""
         import os
 
         os.environ.pop("JEV_SESSION_ID", None)
@@ -561,12 +572,13 @@ class TestCountCallSessionId:
             error=None,
         )
         mock_record.assert_called_once()
-        assert mock_record.call_args.kwargs["session_id"] is None
+        assert mock_record.call_args.kwargs["session_id"] == common.RUN_ID
+        assert common.RUN_ID.startswith("run-")
 
     @patch.dict("os.environ", {"JEV_AGENT_ID": "py-eng"}, clear=False)
     @patch.object(common, "_record_jev_call")
-    def test_agent_id_without_session_not_appended(self, mock_record):
-        """JEV_AGENT_ID without a session_id does not produce ':py-eng'."""
+    def test_agent_id_without_session_tags_the_run_id(self, mock_record):
+        """JEV_AGENT_ID without a session id is appended to the run id, never a bare ':py-eng'."""
         import os
 
         os.environ.pop("JEV_SESSION_ID", None)
@@ -581,7 +593,50 @@ class TestCountCallSessionId:
             error=None,
         )
         mock_record.assert_called_once()
-        assert mock_record.call_args.kwargs["session_id"] is None
+        assert mock_record.call_args.kwargs["session_id"] == f"{common.RUN_ID}:py-eng"
+
+
+class TestRunBudget:
+    """Every request that reaches the network counts toward one run, on any caller's path."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_run(self, monkeypatch):
+        monkeypatch.setattr(common, "_run_tokens", 0)
+        monkeypatch.setattr(common, "_run_warned", False)
+        monkeypatch.delenv("JEV_MAX_RUN_TOKENS", raising=False)
+        monkeypatch.setenv("JEV_CACHE_TTL_S", "0")
+
+    def _payload(self, size: int, tag: str = "") -> dict:
+        return {"model": "m", "state": {"t": tag + "x" * size}, "questions": {"q": {"type": "noul"}}}
+
+    def test_direct_caller_over_the_request_limit_is_warned(self, monkeypatch, capsys) -> None:
+        monkeypatch.setattr(common, "_open_url", lambda _request, **_kw: _ok_response({"q": {"noul": 0.5}}))
+        common.validated_call_jev(self._payload(4 * (common.jev_limits.MAX_REQUEST_TOKENS + 50)), "k", 5)
+        err = capsys.readouterr().err
+        assert f"[jev-budget] {common.RUN_ID}: request is ~" in err
+
+    def test_run_total_warns_once_past_the_per_run_budget(self, monkeypatch, capsys) -> None:
+        monkeypatch.setattr(common, "_open_url", lambda _request, **_kw: _ok_response({"q": {"noul": 0.5}}))
+        per_call = 4 * 4_000  # ~4k tokens each: under the request limit, 14 of them pass 50k
+        for i in range(14):
+            common.call_jev(self._payload(per_call, tag=str(i)), "k", 5)
+        err = capsys.readouterr().err
+        assert err.count("per-run budget") == 1
+        assert common._run_tokens > common.jev_limits.CASCADE_TOKENS_PER_RUN
+
+    def test_opt_in_hard_cap_refuses_before_sending(self, monkeypatch) -> None:
+        monkeypatch.setenv("JEV_MAX_RUN_TOKENS", "100")
+        sent = {"n": 0}
+
+        def fake(request, timeout=None):
+            sent["n"] += 1
+            return _ok_response({"q": {"noul": 0.5}})
+
+        monkeypatch.setattr(common, "_open_url", fake)
+        with pytest.raises(common.RunBudgetExceeded, match="JEV_MAX_RUN_TOKENS=100"):
+            common.call_jev(self._payload(4_000, tag="cap"), "k", 5)
+        assert sent["n"] == 0
+        assert common._inflight == {}  # the refused call released its in-flight slot
 
 
 # ---------------------------------------------------------------------------
@@ -631,7 +686,7 @@ class TestRetry:
                 raise item
             return item
 
-        monkeypatch.setattr(common.urllib.request, "urlopen", fake)
+        monkeypatch.setattr(common, "_open_url", fake)
         data, _ = common.call_jev(self._payload("retry-ok"), "k", 5)
         assert data["answers"]["q"]["noul"] == 0.9
         # Filter out daemon-thread sleeps (cleanup thread sleeps 10s)
@@ -651,11 +706,26 @@ class TestRetry:
                 raise item
             return item
 
-        monkeypatch.setattr(common.urllib.request, "urlopen", fake)
+        monkeypatch.setattr(common, "_open_url", fake)
         common.call_jev(self._payload("retry-after"), "k", 5)
         # Filter out daemon-thread sleeps (cleanup thread sleeps 10s)
         retry_sleeps = [s for s in sleeps if s < 10]
         assert retry_sleeps == [3.0, common._RETRY_MAX_SLEEP_S]
+
+    def test_retry_after_ms_wins_over_retry_after(self):
+        assert common._retry_after_seconds({"retry-after-ms": "1500", "Retry-After": "9"}) == pytest.approx(1.5)
+        assert common._retry_after_seconds({"Retry-After": "4"}) == 4.0
+
+    @pytest.mark.parametrize("headers", [None, {}, {"retry-after-ms": "soon"}, {"Retry-After": "-2"}])
+    def test_retry_after_ignores_missing_or_bad_values(self, headers):
+        assert common._retry_after_seconds(headers) is None
+
+    def test_bad_retry_after_ms_falls_back_to_retry_after(self):
+        assert common._retry_after_seconds({"retry-after-ms": "x", "Retry-After": "2"}) == 2.0
+
+    def test_retry_delay_honors_retry_after_ms_as_a_floor(self):
+        delay = common._retry_delay(_http_error(429, headers={"retry-after-ms": "3000"}), 0)
+        assert delay == pytest.approx(3.0)
 
     def test_gives_up_after_the_retry_limit(self, monkeypatch):
         sleeps: list[float] = []
@@ -667,7 +737,7 @@ class TestRetry:
             calls["n"] += 1
             raise _http_error(429)
 
-        monkeypatch.setattr(common.urllib.request, "urlopen", fake)
+        monkeypatch.setattr(common, "_open_url", fake)
         with pytest.raises(RuntimeError, match="HTTP 429"):
             common.call_jev(self._payload("retry-limit"), "k", 5)
         assert calls["n"] == 3 and len(sleeps) == 2
@@ -682,7 +752,7 @@ class TestRetry:
             calls["n"] += 1
             raise _http_error(code)
 
-        monkeypatch.setattr(common.urllib.request, "urlopen", fake)
+        monkeypatch.setattr(common, "_open_url", fake)
         with pytest.raises(RuntimeError):
             common.call_jev(self._payload(f"no-retry-{code}"), "k", 5)
         assert calls["n"] == 1 and sleeps == []
@@ -709,7 +779,7 @@ class TestErrorTextCarriesNoBody:
         def fake(request, timeout=None):
             raise _http_error(422, body)
 
-        monkeypatch.setattr(common.urllib.request, "urlopen", fake)
+        monkeypatch.setattr(common, "_open_url", fake)
         with pytest.raises(RuntimeError) as err:
             common.call_jev(self._payload("err-422"), "k", 5)
         text = str(err.value)
@@ -722,7 +792,163 @@ class TestErrorTextCarriesNoBody:
         def fake(request, timeout=None):
             raise _http_error(402, body)
 
-        monkeypatch.setattr(common.urllib.request, "urlopen", fake)
+        monkeypatch.setattr(common, "_open_url", fake)
         with pytest.raises(RuntimeError) as err:
             common.call_jev(self._payload("err-402"), "k", 5)
         assert str(err.value) == "HTTP 402 (billing_error)"
+
+
+# ---------------------------------------------------------------------------
+# Pinned endpoint: a redirect must never carry the key to another host
+# ---------------------------------------------------------------------------
+
+
+class TestRedirectRefused:
+    def test_redirect_is_not_followed_and_key_is_not_resent(self, monkeypatch) -> None:
+        import http.server
+        import threading
+
+        seen: list[str | None] = []
+
+        class Target(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                seen.append(self.headers.get("Authorization"))
+                body = b'{"answers": {"q": {"noul": 0.9}}}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        target = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Target)
+
+        class Redirector(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{target.server_port}/v1/systemone")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        redirector = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirector)
+        threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in (target, redirector)]
+        for t in threads:
+            t.start()
+        monkeypatch.setattr(common, "TYPESAFE_URL", f"http://127.0.0.1:{redirector.server_port}/v1/systemone")
+        try:
+            payload = {
+                "model": "m",
+                "state": {"t": "redirect"},
+                "questions": {"q": {"type": "noul", "instructions": "x"}},
+            }
+            with pytest.raises(RuntimeError, match="HTTP 302"):
+                common.call_jev(payload, "secret-key-123", timeout=5)
+        finally:
+            for s in (target, redirector):
+                s.shutdown()
+                s.server_close()
+        assert seen == []
+
+
+class TestValidatedCallFailsClosed:
+    @pytest.mark.parametrize(
+        "answers",
+        [
+            {"q": {"noul": float("nan")}},
+            {"q": {"noul": 4}},
+            {"q": {"noul": True}},
+            {"q": {"noul": "0.9"}},
+            {"q": "yes"},
+            {"q": {"text": "no recognized type"}},
+            {"q": {"choice": "a", "probabilities": {"a": 0.2, "b": 0.2}}},
+            {"q": {"score": True}},
+        ],
+    )
+    def test_invalid_response_raises_instead_of_returning_data(self, monkeypatch, capsys, answers) -> None:
+        monkeypatch.setattr(common, "call_jev", lambda *_a, **_k: ({"answers": answers}, 1.0))
+        with pytest.raises(ValueError, match="invalid Jev response"):
+            common.validated_call_jev({"state": {}, "questions": {}}, "k", 5)
+        assert "[jev-validate]" in capsys.readouterr().err
+
+    def test_valid_response_passes_through(self, monkeypatch) -> None:
+        data = {"answers": {"q": {"noul": 0.4}, "c": {"choice": "a", "probabilities": {"a": 1.0}}}}
+        monkeypatch.setattr(common, "call_jev", lambda *_a, **_k: (data, 2.0))
+        assert common.validated_call_jev({}, "k", 5) == (data, 2.0)
+
+
+def _raw_response(body: bytes):
+    resp = MagicMock()
+    resp.read.return_value = body
+    resp.__enter__.return_value = resp
+    resp.__exit__.return_value = False
+    return resp
+
+
+class TestCallJevReleasesAndValidates:
+    """A bad reply must not stall the next caller, poison the cache, or reach only one waiter."""
+
+    def _payload(self, tag: str) -> dict:
+        return {"model": "m", "state": {"t": tag}, "questions": {"q": {"type": "noul", "instructions": "x"}}}
+
+    def test_non_json_reply_releases_the_in_flight_slot(self, monkeypatch) -> None:
+        replies = [_raw_response(b"<html>gateway error</html>"), _raw_response(b'{"answers": {"q": {"noul": 0.3}}}')]
+        monkeypatch.setattr(common, "_open_url", lambda _request, **_kw: replies.pop(0))
+        with pytest.raises(ValueError, match="not JSON"):
+            common.call_jev(self._payload("non-json"), "k", 5)
+        assert common._inflight == {}
+        started = time.monotonic()
+        data, _ = common.call_jev(self._payload("non-json"), "k", 5)
+        assert time.monotonic() - started < 2.0  # no wait on an orphaned in-flight event
+        assert data["answers"]["q"]["noul"] == 0.3
+
+    def test_invalid_answers_are_not_cached(self, monkeypatch) -> None:
+        monkeypatch.setenv("JEV_CACHE_TTL_S", "120")
+        replies = [_ok_response({"q": {"noul": 4}}), _ok_response({"q": {"noul": 0.2}})]
+        calls = {"n": 0}
+
+        def fake(request, timeout=None):
+            calls["n"] += 1
+            return replies.pop(0)
+
+        monkeypatch.setattr(common, "_open_url", fake)
+        with pytest.raises(ValueError, match="invalid Jev response"):
+            common.validated_call_jev(self._payload("bad-cache"), "k", 5)
+        data, _ = common.validated_call_jev(self._payload("bad-cache"), "k", 5)
+        assert calls["n"] == 2  # the bad answer was never served from the cache
+        assert data["answers"]["q"]["noul"] == 0.2
+
+    def test_every_waiter_gets_the_in_flight_result(self, monkeypatch) -> None:
+        monkeypatch.setenv("JEV_CACHE_TTL_S", "0")
+        entered = threading.Event()
+        release = threading.Event()
+        calls = {"n": 0}
+
+        def slow(request, timeout=None):
+            calls["n"] += 1
+            entered.set()
+            release.wait(5)
+            return _ok_response({"q": {"noul": 0.6}})
+
+        monkeypatch.setattr(common, "_open_url", slow)
+        results: list = []
+
+        def call() -> None:
+            results.append(common.call_jev(self._payload("waiters"), "k", 5)[0])
+
+        owner = threading.Thread(target=call)
+        owner.start()
+        assert entered.wait(5)
+        waiters = [threading.Thread(target=call) for _ in range(2)]
+        for t in waiters:
+            t.start()
+        time.sleep(0.3)  # let both waiters block on the owner's event
+        release.set()
+        for t in [owner, *waiters]:
+            t.join(10)
+        assert calls["n"] == 1
+        assert [r["answers"]["q"]["noul"] for r in results] == [0.6, 0.6, 0.6]

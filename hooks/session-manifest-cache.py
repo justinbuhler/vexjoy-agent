@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hook-version: 1.0.0
+# hook-version: 1.0.2
 """SessionStart Hook: hash-gated /do routing-manifest cache.
 
 ADR router-improvement-program C5. Verifies (or rebuilds) the disk cache of
@@ -22,6 +22,25 @@ Behavior:
 - Advisory: always exits 0.
 """
 
+import sys  # vexjoy-pyguard
+
+if sys.version_info < (3, 10):  # vexjoy-pyguard advisory
+    import os
+
+    if not os.environ.get("VEXJOY_PYGUARD_REEXEC"):
+        os.environ["VEXJOY_PYGUARD_REEXEC"] = "1"
+        for _d in [*os.environ.get("PATH", "").split(os.pathsep), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
+            for _v in ("14", "13", "12", "11", "10"):
+                _p = os.path.join(_d, "python3." + _v)
+                if _d and "/shims" not in _d and os.access(_p, os.X_OK):
+                    os.execv(_p, [_p, *sys.argv])
+    sys.stderr.write(
+        "[vexjoy] hook %s needs Python 3.10+, got %s (%s); run ./install.sh in vexjoy-agent from a terminal"
+        " outside Claude Code (gated tool calls stay blocked until then)\n"
+        % (__file__.rsplit("/", 1)[-1], sys.version.split()[0], sys.executable)
+    )
+    sys.exit(0)
+
 import os
 import sys
 from pathlib import Path
@@ -33,7 +52,15 @@ from manifest_cache import CACHE_FILE, refresh, resolve_scripts_dir
 EVENT_NAME = "SessionStart"
 
 
+_BYPASS_ENV = "SESSION_MANIFEST_CACHE_BYPASS"
+
+
 def main() -> None:
+    if os.environ.get(_BYPASS_ENV) == "1":
+        if os.environ.get("CLAUDE_HOOKS_DEBUG"):
+            print("[session-manifest-cache] Bypassed via SESSION_MANIFEST_CACHE_BYPASS=1", file=sys.stderr)
+        sys.exit(0)
+
     scripts_dir = resolve_scripts_dir()
     if scripts_dir is None:
         # No deployed toolkit — nothing to cache.

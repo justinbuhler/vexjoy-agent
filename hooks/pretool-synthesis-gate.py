@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hook-version: 1.1.1
+# hook-version: 1.1.3
 """
 PreToolUse:Write,Edit Hook: Consultation Synthesis Gate
 
@@ -12,13 +12,12 @@ This is a HARD GATE — exits 0 with JSON permissionDecision:deny to block the W
 Detection logic:
 - Tool is Write or Edit
 - .adr-session.json exists (active ADR session)
-- Target path is NOT in hooks/, scripts/, adr/, or test files
+- Target path is under agents/ or skills/ (any file type, tests included)
 - No synthesis.md in the ADR consultation directory
 
 Allow-through conditions:
 - No .adr-session.json (no active ADR session)
-- Target file is in hooks/, scripts/, adr/, commands/ (infrastructure, not implementation)
-- Target file is a test file (*_test.go, *_test.py, test_*.py, *.test.ts)
+- Target file is outside agents/ and skills/ (hooks/, scripts/, adr/, commands/, docs, root files)
 - synthesis.md exists with explicit PROCEED verdict
 - SYNTHESIS_GATE_BYPASS=1 env var (for the consultation skill itself)
 
@@ -36,6 +35,25 @@ registration date, ADR name, checklist state) and the close command to the
 denial message, so the fix takes seconds instead of an investigation.
 See scripts/adr-query.py close.
 """
+
+import sys  # vexjoy-pyguard
+
+if sys.version_info < (3, 10):  # vexjoy-pyguard gate
+    import os
+
+    if not os.environ.get("VEXJOY_PYGUARD_REEXEC"):
+        os.environ["VEXJOY_PYGUARD_REEXEC"] = "1"
+        for _d in [*os.environ.get("PATH", "").split(os.pathsep), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
+            for _v in ("14", "13", "12", "11", "10"):
+                _p = os.path.join(_d, "python3." + _v)
+                if _d and "/shims" not in _d and os.access(_p, os.X_OK):
+                    os.execv(_p, [_p, *sys.argv])
+    sys.stderr.write(
+        "[vexjoy] hook %s needs Python 3.10+, got %s (%s); run ./install.sh in vexjoy-agent from a terminal"
+        " outside Claude Code (gated tool calls stay blocked until then)\n"
+        % (__file__.rsplit("/", 1)[-1], sys.version.split()[0], sys.executable)
+    )
+    sys.exit(2)
 
 import json
 import os
@@ -62,50 +80,24 @@ _CLOSE_COMMAND = "python3 scripts/adr-query.py close"
 # Markdown checklist item: "- [ ] text" / "- [x] text".
 _CHECKLIST_ITEM_RE = re.compile(r"^\s*-\s+\[([ xX])\]\s+\S", re.MULTILINE)
 
-# Paths that ARE implementation code — only these get gated.
-# Everything else (docs, config, CI, plans, tests) passes through.
+# Directories that ARE implementation — every file under them is gated.
+# Everything else (docs, config, CI, plans, scripts, hooks) passes through.
 _GATED_PREFIXES = (
     "/agents/",
     "/skills/",
 )
 
-# Source code extensions that are implementation code.
-_GATED_EXTENSIONS = frozenset(
-    {
-        ".py",
-        ".go",
-        ".ts",
-        ".tsx",
-        ".js",
-        ".jsx",
-        ".rs",
-        ".java",
-        ".rb",
-        ".c",
-        ".cpp",
-        ".cs",
-    }
-)
-
 
 def _is_gated(file_path: str) -> bool:
-    """Return True if this is implementation code that requires consultation."""
+    """Return True if this file is implementation that requires consultation.
+
+    The rule is the directory alone: any file under agents/ or skills/ (agent
+    and skill markdown, references, assets, scripts, their tests). Skills and
+    agents are implemented mostly in markdown, so a file-type filter would let
+    most of their implementation through. Files elsewhere are not gated.
+    """
     normalised = file_path.replace("\\", "/")
-    basename = normalised.rsplit("/", 1)[-1] if "/" in normalised else normalised
-    ext = "." + basename.rsplit(".", 1)[-1] if "." in basename else ""
-
-    # Only gate source files in implementation directories
-    in_gated_dir = any(prefix in normalised for prefix in _GATED_PREFIXES)
-    is_source = ext.lower() in _GATED_EXTENSIONS
-
-    # Gate if it's a source file in an implementation directory
-    # OR if it's a SKILL.md or agent .md being created/modified
-    if in_gated_dir:
-        return True
-
-    # Standalone source files at repo root (rare but possible)
-    # are NOT gated — they're scripts or utilities
-    return False
+    return any(prefix in normalised for prefix in _GATED_PREFIXES)
 
 
 def _load_session(base_dir: Path) -> dict | None:
@@ -243,8 +235,8 @@ def main() -> None:
     if not file_path:
         sys.exit(0)
 
-    # Only gate implementation code (agents/, skills/).
-    # Everything else (docs, config, CI, plans, tests, scripts) passes through.
+    # Only gate implementation code: any file under agents/ or skills/.
+    # Everything outside them (docs, config, CI, plans, scripts) passes through.
     if not _is_gated(file_path):
         if debug:
             print(f"[synthesis-gate] Not implementation code, allowing: {file_path}", file=sys.stderr)

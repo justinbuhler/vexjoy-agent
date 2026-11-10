@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .common import SCHEMA_VERSION, utc_iso, utc_ts
-from .fsops import Guard, atomic_write_json
+from .fsops import Guard, retry_rename, write_json_if_changed
 
 STATUS_OK = "ok"
 STATUS_STALE = "stale-source"
@@ -40,6 +40,8 @@ class Ledger:
     overlays_mtime: float | None = None
     entries: dict[str, LedgerEntry] = field(default_factory=dict)
     settings: dict[str, list[str]] = field(default_factory=dict)
+    # target -> UTC time of the uninstall that removed it; sync skips these until apply.
+    uninstalled: dict[str, str] = field(default_factory=dict)
 
     def for_target(self, target: str) -> dict[str, LedgerEntry]:
         """Entries of one target keyed by dest."""
@@ -55,6 +57,7 @@ class Ledger:
             "overlays_mtime": self.overlays_mtime,
             "entries": [asdict(e) for e in sorted(self.entries.values(), key=lambda e: (e.target, e.dest))],
             "settings": {k: sorted(v) for k, v in sorted(self.settings.items())},
+            "uninstalled": dict(sorted(self.uninstalled.items())),
         }
 
 
@@ -94,6 +97,9 @@ def parse(data: object) -> Ledger:
     settings = data.get("settings", {})
     if not isinstance(settings, dict):
         raise LedgerCorrupt("bad settings")
+    uninstalled = data.get("uninstalled", {})
+    if not isinstance(uninstalled, dict):
+        raise LedgerCorrupt("bad uninstalled")
     return Ledger(
         schema=SCHEMA_VERSION,
         source_root=data.get("source_root"),
@@ -102,13 +108,14 @@ def parse(data: object) -> Ledger:
         overlays_mtime=data.get("overlays_mtime"),
         entries=entries,
         settings={str(k): list(v) for k, v in settings.items()},
+        uninstalled={str(k): str(v) for k, v in uninstalled.items()},
     )
 
 
 def save(path: Path, ledger: Ledger, guard: Guard) -> None:
-    """Atomic write (temp + os.replace)."""
+    """Atomic write (temp + os.replace), skipped when only ``updated_at`` would change."""
     ledger.updated_at = utc_iso()
-    atomic_write_json(path, ledger.to_json(), guard, mode=0o600)
+    write_json_if_changed(path, ledger.to_json(), guard, mode=0o600, stamps=("updated_at",))
 
 
 def quarantine(path: Path, guard: Guard) -> Path | None:
@@ -117,5 +124,5 @@ def quarantine(path: Path, guard: Guard) -> Path | None:
         return None
     dest = path.with_name(f"ledger.corrupt.{utc_ts()}")
     guard.check(dest)
-    os.rename(path, dest)
+    retry_rename(path, dest)
     return dest

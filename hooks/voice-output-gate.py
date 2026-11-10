@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hook-version: 1.0.1
+# hook-version: 1.0.3
 """
 UserPromptSubmit hook — inject voice output gate for external text actions.
 
@@ -30,6 +30,7 @@ if LOCAL_LIB.is_dir():
 try:
     from hook_utils import HookOutput, empty_output, hook_error
     from skill_directives import skill_call_directive
+    from stdin_timeout import read_stdin
 except ImportError:
     # Graceful degradation if hook_utils not available
     def _noop():
@@ -131,10 +132,19 @@ def build_gate_instruction(voice_mode: bool, prompt: str = "") -> str:
     return "\n".join(lines)
 
 
+_BYPASS_ENV = "VOICE_OUTPUT_GATE_BYPASS"
+
+
 def main():
-    # Read the user prompt from stdin (Claude Code passes it as JSON)
+    if os.environ.get(_BYPASS_ENV) == "1":
+        if os.environ.get("CLAUDE_HOOKS_DEBUG"):
+            print("[voice-output-gate] Bypassed via VOICE_OUTPUT_GATE_BYPASS=1", file=sys.stderr)
+        sys.exit(0)
+
+    # Read the user prompt from stdin (Claude Code passes it as JSON). The read is
+    # bounded: a pipe that never closes yields "" and the empty result below.
     try:
-        input_data = json.loads(sys.stdin.read())
+        input_data = json.loads(read_stdin(timeout=2))
         prompt = input_data.get("prompt", "") or input_data.get("message", "")
     except (json.JSONDecodeError, KeyError):
         empty_output("UserPromptSubmit").print_and_exit()

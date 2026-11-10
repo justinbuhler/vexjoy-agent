@@ -17,6 +17,8 @@ Checks:
   7. Pinned core triggers stay literal triggers of their component (skill in
      skills/INDEX.json, else pipeline in pipeline-index.json), so a trigger
      rewrite cannot silently unroute a core /do path.
+  8. Agent triggers are not run-on rename damage (``^programming[a-z-]+$``)
+     and no single-word trigger is shared by 3+ agents.
 
 Note: routing-tables.md coverage check was removed in PR #653 — routing-tables.md was
 absorbed into INDEX.json (PR #626) and check-routing-drift.py now covers this in CI.
@@ -33,6 +35,11 @@ import json
 import re
 import sys
 from pathlib import Path
+
+# scripts/lib holds the shared helper; append so it shadows nothing.
+sys.path.append(str(Path(__file__).resolve().parent / "lib"))
+
+from index_freshness import ensure_fresh_indexes
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -291,6 +298,33 @@ def check_cross_entry_trigger_overlap(skills_index: dict, agents_index: dict) ->
     return errors, warnings
 
 
+AGENT_SHARED_WORD_LIMIT = 3
+_RENAME_DAMAGE = re.compile(r"^programming[a-z-]+$")
+
+
+def check_agent_trigger_damage(agents_index: dict) -> tuple[list[str], list[str]]:
+    """Check 8: reject rename-damaged agent triggers and shared single-word triggers."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    word_owners: dict[str, list[str]] = {}
+    for name, entry in agents_index.get("agents", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        for trigger in entry.get("triggers", []):
+            t = trigger.strip().lower()
+            if _RENAME_DAMAGE.match(t):
+                errors.append(f"  [rename damage] agent '{name}' trigger '{trigger}' matches ^programming[a-z-]+$")
+            if t and " " not in t and "-" not in t:
+                word_owners.setdefault(t, []).append(name)
+
+    for word, owners in sorted(word_owners.items()):
+        if len(owners) >= AGENT_SHARED_WORD_LIMIT:
+            errors.append(f"  [shared trigger] single-word trigger '{word}' shared by {len(owners)} agents: {owners}")
+
+    return errors, warnings
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -326,11 +360,21 @@ def check_pinned_triggers(
 
 def main() -> int:
     """Run all integrity checks and report results. Returns exit code."""
-    script_dir = Path(__file__).parent
+    script_dir = Path(__file__).resolve().parent
     repo_root = script_dir.parent
 
     skills_index_path = repo_root / "skills" / "INDEX.json"
     agents_index_path = repo_root / "agents" / "INDEX.json"
+
+    # Both indexes are generated and untracked: regenerate a missing or stale
+    # one so the checks read what the sources say now.
+    try:
+        regenerated = ensure_fresh_indexes(repo_root)
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+    if regenerated:
+        print(f"Regenerated stale index: {', '.join(regenerated)}")
 
     print("Loading index files...")
     # Merge tracked + local overlay (same merge routing_index_merge uses)
@@ -371,6 +415,7 @@ def main() -> int:
             "Check 6: cross-entry trigger overlap",
             check_cross_entry_trigger_overlap(skills_index, agents_index),
         ),
+        ("Check 8: agent trigger damage", check_agent_trigger_damage(agents_index)),
         (
             "Check 7: pinned core triggers",
             check_pinned_triggers(

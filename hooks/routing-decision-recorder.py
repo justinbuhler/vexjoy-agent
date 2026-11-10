@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hook-version: 1.5.0
+# hook-version: 1.6.0
 """
 PostToolUse Hook: Routing Decision Recorder (action A, formerly /do Phase 5)
 
@@ -44,10 +44,15 @@ and the subagent's tool_result. From these we:
      (tool_errors, request/description snippet).
   3. (C) Parse a `rightsizing:tier{N}` banner from the subagent output and
      record a separate rightsizing row, parse-only and silent when absent.
+     A background dispatch has no reply here; routing-outcome-recorder.py
+     reads its banner at SubagentStop (hooks/lib/rightsizing_banner.py).
   4. (D, v1.3.0) Parse the `route-fit:` banner from the subagent output and
      score it ASYMMETRICALLY: a negative verdict decays the route, `ok` is a
      no-op that boosts nothing. Parse-only and silent when absent. See
      record_route_fit for why a self-report may only move against the router.
+     A background dispatch returns a launch receipt here, not the reply: this
+     hook registers its agent id, and routing-outcome-recorder.py scores the
+     banner at SubagentStop.
   5. Write a pending-outcome entry to a per-session file so the SubagentStop
      hook (routing-outcome-recorder.py) can recover the full key + the error
      verdict and apply boost/decay. PostToolUse:Agent fires before
@@ -64,6 +69,25 @@ Design Principles:
 - Fast execution (<50ms target); lazy imports
 """
 
+import sys  # vexjoy-pyguard
+
+if sys.version_info < (3, 10):  # vexjoy-pyguard advisory
+    import os
+
+    if not os.environ.get("VEXJOY_PYGUARD_REEXEC"):
+        os.environ["VEXJOY_PYGUARD_REEXEC"] = "1"
+        for _d in [*os.environ.get("PATH", "").split(os.pathsep), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
+            for _v in ("14", "13", "12", "11", "10"):
+                _p = os.path.join(_d, "python3." + _v)
+                if _d and "/shims" not in _d and os.access(_p, os.X_OK):
+                    os.execv(_p, [_p, *sys.argv])
+    sys.stderr.write(
+        "[vexjoy] hook %s needs Python 3.10+, got %s (%s); run ./install.sh in vexjoy-agent from a terminal"
+        " outside Claude Code (gated tool calls stay blocked until then)\n"
+        % (__file__.rsplit("/", 1)[-1], sys.version.split()[0], sys.executable)
+    )
+    sys.exit(0)
+
 import hashlib
 import json
 import os
@@ -74,8 +98,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 from hook_utils import hook_error
-from route_types import DO_ROUTE_MARKER_RE, HealthGateInputs
-from routing_outcome_state import append_pending_outcome, claim_dispatch
+
+try:
+    from route_types import DO_ROUTE_MARKER_RE, HealthGateInputs
+except ImportError as exc:
+    # route_types lives in scripts/lib, so an install without scripts/ cannot load it.
+    # Record why and exit 0: this hook only records telemetry.
+    hook_error("routing-decision-recorder", exc)
+    sys.exit(0)
+from rightsizing_banner import record_rightsizing
+from route_fit import _ROUTE_FIT_NEGATIVE, _ROUTE_FIT_RE, parse_route_fit, record_route_fit
+from routing_outcome_state import append_pending_outcome, claim_dispatch, register_async_dispatch
 from stdin_timeout import read_stdin
 
 EVENT_NAME = "PostToolUse"
@@ -121,18 +154,32 @@ _PIPELINE_RE = re.compile(r"\bpipeline=([a-z0-9-]+)", re.IGNORECASE)
 # Model token on the marker line: `model=opus` or `model=-`. GPT-5.6 selections
 # carry an additional `effort=` token. Valid values match build-dispatch.py;
 # `model=-` or absent => null. Old markers remain readable.
-_MODEL_RE = re.compile(r"\bmodel=([a-z0-9.-]+|-)", re.IGNORECASE)
+_MODEL_RE = re.compile(r"\bmodel=([a-z0-9._-]+|-)", re.IGNORECASE)
 _EFFORT_RE = re.compile(r"\beffort=(low|medium|high|xhigh|max)", re.IGNORECASE)
 _VALID_MODELS = frozenset(
     {
         "inherit",
+        "haiku",
         "sonnet",
         "opus",
+        "fable",
         "codex",
         "gpt-5.5",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
+        "gemini-4-argon",
+        "gemini-4-argon-low",
+        "gemini-4-argon-medium",
+        "gemini-4-argon-high",
+        "gemini-3.8-flash",
+        "gemini-3.8-flash-low",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-high",
+        "argon",
+        "flash",
+        "flash_lite",
+        "pro",
     }
 )
 
@@ -368,100 +415,30 @@ def parse_model_effort(marker_text: str) -> str | None:
     return match.group(1).lower() if match else None
 
 
-# Right-sizing banner. The first four fields are required; findings= and the
-# cost fields (tokens=, wall_clock_s=) are optional, additive extensions
-# (ADR: review-tier-roi). Legacy four-field banners still match.
-#   rightsizing: tier=3 files=15 packages=4 agents_dispatched=17 findings=2C/3H/5M tokens=84000 wall_clock_s=312
-_RIGHTSIZING_RE = re.compile(
-    r"rightsizing:\s*tier=(\d+)\s+files=(\d+)\s+packages=(\d+)\s+agents_dispatched=(\d+)"
-    r"(?:\s+findings=(\d+)C/(\d+)H/(\d+)M)?"
-    r"(?:\s+tokens=(\d+))?"
-    r"(?:\s+wall_clock_s=(\d+))?",
-    re.IGNORECASE,
-)
+# Right-sizing banner (C): parsing and recording live in hooks/lib/rightsizing_banner.py,
+# shared with routing-outcome-recorder.py. A background dispatch returns only a
+# launch receipt here, so its banner is recorded at SubagentStop instead.
 
 
-# Route-fit banner (D). Every dispatched agent is asked (build-dispatch.py
-# INJ_ROUTE_FIT) to close its reply with:
-#   route-fit: ok
-#   route-fit: wrong-agent | wrong-skill | needs-coordinator | underspecified
-# Anchored to a WHOLE line (^...$, MULTILINE) so the banner spec quoted mid-prose
-# is not a verdict; the LAST match wins because the banner is the final line.
-_ROUTE_FIT_NEGATIVE = ("wrong-agent", "wrong-skill", "needs-coordinator", "underspecified")
-_ROUTE_FIT_RE = re.compile(
-    r"^\s*(?:[-*>`\s]*)route-fit:\s*(ok|wrong-agent|wrong-skill|needs-coordinator|underspecified)\s*`?\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
+# Route-fit banner (D): parsing and scoring live in hooks/lib/route_fit.py,
+# shared with routing-outcome-recorder.py. A background dispatch returns only a
+# launch receipt here, so its banner is scored at SubagentStop instead.
 
 
-def parse_route_fit(output: str) -> str | None:
-    """Read the route-fit verdict off the agent's output, or None.
+def async_agent_id(result: object) -> str | None:
+    """Agent id from a background launch receipt, or None for any other result.
 
-    None means "no verdict": banner absent, or malformed (a value outside the
-    enum, or trailing prose on the line). Parse-only and silent, exactly like
-    the rightsizing banner — a missing or broken banner must never affect a
-    dispatch, and must never be guessed at.
+    A background ``Agent`` call returns
+    ``{"isAsync": true, "status": "async_launched", "agentId": "..."}`` at
+    PostToolUse: the agent has started, not finished. A foreground call returns
+    the reply and must not be registered for a second read at SubagentStop.
     """
-    if not output or "route-fit:" not in output.lower():
+    if not isinstance(result, dict):
         return None
-    verdicts = _ROUTE_FIT_RE.findall(output)
-    return verdicts[-1].lower() if verdicts else None
-
-
-def record_route_fit(output: str, key: str, session_id: str | None = None) -> str | None:
-    """(D) Score one route-fit verdict for ``key``. Returns the verdict, or None.
-
-    ASYMMETRIC BY DESIGN — the whole point of the signal.
-
-      negative verdict => STRONG evidence: apply_outcome(FAILURE) decays the
-        route's confidence, exactly as a tool error or a user rejection does.
-      `ok`             => WEAK evidence: apply_outcome(NEUTRAL) is a no-op on
-        confidence. It records the basis counter (so the verdict is countable)
-        and boosts NOTHING.
-
-    Rationale: the agent grading the fit was handed the wrong domain
-    instructions in precisely the case we care about, and an agent that has
-    just spent a session on a task will rationalize that it was the right one
-    to do it. A self-report is therefore credible when it says "this was not
-    mine" and worthless when it says "this was mine". So the signal is wired to
-    move only AGAINST the router, never to flatter it. Under the old metric —
-    success inferred from the absence of a complaint — a timid general-purpose
-    fallback scored identically to a correct specialist; a signal that could
-    boost on self-declared `ok` would reproduce that exact failure.
-
-    Caller MUST have written the decision row for ``key`` first (apply_outcome
-    is a no-op on a missing row); main() calls this only for a key it just
-    recorded.
-    """
-    verdict = parse_route_fit(output)
-    if verdict is None:
+    if not (result.get("isAsync") is True or result.get("status") == "async_launched"):
         return None
-
-    from routing_outcome_score import FAILURE, NEUTRAL, apply_outcome
-
-    negative = verdict in _ROUTE_FIT_NEGATIVE
-    basis = f"route_fit:{verdict}"
-    apply_outcome(key, FAILURE if negative else NEUTRAL, basis=basis)
-
-    if negative:
-        # Surface the verdict on the decision row so `evidence-route-context`
-        # shows WHY a route decayed. NEGATIVES ONLY: this is a second commit
-        # (~3ms) and it buys diagnosis of the cases you actually investigate.
-        # On the common `ok` path it would cost every dispatch for a row that
-        # says nothing happened. Best-effort — the basis counter above is the
-        # durable record, and a later finalizer may overwrite this column.
-        try:
-            from learning_db_v2 import update_evidence_route_outcome
-
-            update_evidence_route_outcome(
-                route_key=key,
-                session_id=session_id or None,
-                outcome="failure",
-                outcome_basis=basis,
-            )
-        except Exception:
-            pass
-    return verdict
+    agent_id = result.get("agentId") or result.get("agent_id")
+    return agent_id if isinstance(agent_id, str) and agent_id else None
 
 
 _FALLBACK_REASON_KEY_PREFIX = "fallback-reason:"
@@ -647,39 +624,6 @@ def extract_output_text(result: object) -> str:
     return ""
 
 
-def record_rightsizing(output: str, session_id: str | None = None) -> None:
-    """(C) Add one rightsizing review to the tier's running sums. Silent when no banner.
-
-    Per-review findings and cost are accumulated into running sums in the
-    rightsizing:tier{N} row (`accumulate_rightsizing`) so `learning-db.py
-    review-roi` reports a TRUE per-tier mean (sum / count), not the last
-    review's sample. findings= and the cost fields are optional: a legacy
-    banner (no findings=) bumps the review count only; a "-" cost never enters
-    its sum (ADR: review-tier-roi).
-    """
-    if not output or "rightsizing:" not in output.lower():
-        return
-    m = _RIGHTSIZING_RE.search(output)
-    if not m:
-        return
-
-    def _int_or_none(s: str | None) -> int | None:
-        return int(s) if s is not None and s != "" else None
-
-    from learning_db_v2 import accumulate_rightsizing
-
-    accumulate_rightsizing(
-        int(m.group(1)),
-        critical=_int_or_none(m.group(5)),
-        high=_int_or_none(m.group(6)),
-        medium=_int_or_none(m.group(7)),
-        tokens=_int_or_none(m.group(8)),
-        wall_clock_s=_int_or_none(m.group(9)),
-        source="hook:routing-decision-recorder",
-        session_id=session_id or None,
-    )
-
-
 def main() -> None:
     try:
         raw = read_stdin(timeout=2)
@@ -733,6 +677,7 @@ def main() -> None:
 
         has_errors = None  # computed once, on the first claimed marker
         recorded_keys: list[str] = []  # routing keys this event actually recorded
+        recorded_decision_ids: list[str] = []  # evidence row id per recorded key
         for agent, skill, sig, marker_text in decisions:
             # Idempotency (atomic, MEDIUM/TOCTOU): claim this dispatch signature.
             # claim_dispatch performs check-and-set under one flock, so N concurrent
@@ -765,6 +710,8 @@ def main() -> None:
                 session_id=session_id or None,
             )
             recorded_keys.append(key)
+            decision_id = f"{session_id or 'no-session'}:{sig}"
+            recorded_decision_ids.append(decision_id)
 
             # T3: per-dispatch DECISION event (JSONL), append-only + failure-safe.
             # Auxiliary to the aggregate row above — never blocks; route_events
@@ -850,7 +797,7 @@ def main() -> None:
                     action=health["action"],
                     alternates=health["alternates"],
                     gate_inputs_present=bool(health["gate_inputs_present"]),
-                    decision_id=f"{session_id or 'no-session'}:{sig}",
+                    decision_id=decision_id,
                     spec_score=spec_score,
                     spec_missing=spec_missing,
                     prompt_chars=prompt_chars,
@@ -868,7 +815,7 @@ def main() -> None:
             # in the UserPromptSubmit finalizer / Stop fallback, and any other
             # dispatch's SubagentStop merely revalidates these entries (their
             # decision rows exist, written above).
-            append_pending_outcome(session_id, key, has_errors)
+            append_pending_outcome(session_id, key, has_errors, decision_id)
 
         if not recorded_keys:
             return  # every marker already claimed (duplicate delivery / resume)
@@ -881,7 +828,19 @@ def main() -> None:
         # delivery / resubmitted script never double-accumulates the tier sums.
         from hook_utils import get_tool_result
 
-        output = extract_output_text(get_tool_result(event))
+        result = get_tool_result(event)
+
+        # A background Agent dispatch returns a launch receipt here, not the
+        # reply. Register the agent id so routing-outcome-recorder.py can read
+        # the rightsizing and route-fit banners when the reply arrives at
+        # SubagentStop. One decision only, as below: a Workflow has no single
+        # agent id.
+        if tool_name == "Agent" and len(recorded_keys) == 1:
+            launched = async_agent_id(result)
+            if launched:
+                register_async_dispatch(session_id, launched, recorded_keys[0], recorded_decision_ids[0])
+
+        output = extract_output_text(result)
         if output:
             record_rightsizing(output, session_id)
 
@@ -894,7 +853,7 @@ def main() -> None:
             # the dispatch (fail open, same contract as the evidence row above).
             if len(recorded_keys) == 1:
                 try:
-                    record_route_fit(output, recorded_keys[0], session_id)
+                    record_route_fit(output, recorded_keys[0], session_id, recorded_decision_ids[0])
                 except Exception:
                     pass
 

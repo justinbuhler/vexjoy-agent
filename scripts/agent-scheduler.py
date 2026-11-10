@@ -52,11 +52,21 @@ _PID_FILE = Path("/tmp/agent-scheduler.pid")
 
 _COST_PER_MILLION: dict[str, dict[str, float]] = {
     # Claude API list price per 1M tokens for the model each alias resolves to
-    # today (haiku -> Haiku 4.5, sonnet -> Sonnet 5, opus -> Opus 5). Re-check
-    # whenever the alias targets change.
-    "haiku": {"input": 1.00, "output": 5.00},
+    # (haiku -> Haiku 5.5, sonnet -> Sonnet 5.5, opus -> Opus 5.5, fable ->
+    # Fable 5.2). Source: Anthropic model guide, 2026-11-09. Re-check whenever
+    # the alias targets change.
+    "haiku": {"input": 0.10, "output": 0.50},
     "sonnet": {"input": 2.00, "output": 10.00},
-    "opus": {"input": 5.00, "output": 25.00},
+    "opus": {"input": 4.00, "output": 20.00},
+    "fable": {"input": 8.00, "output": 40.00},
+}
+# Model for a Claude job that names none. Owner order 2026-11-01: Sonnet is no
+# default; scheduled jobs edit, decide, or write, so they run on Opus.
+_DEFAULT_MODEL = "opus"
+# Haiku 5.5 bills a higher rate when the prompt exceeds 100K tokens.
+_LONG_PROMPT_TOKENS = 100_000
+_LONG_PROMPT_COST_PER_MILLION: dict[str, dict[str, float]] = {
+    "haiku": {"input": 0.50, "output": 2.50},
 }
 
 log = logging.getLogger("agent-scheduler")
@@ -218,7 +228,7 @@ def load_config(config_path: Path) -> dict[str, Any]:
             if not isinstance(job.get("prompt"), str) or not job["prompt"]:
                 log.error("Claude job %s must define a non-empty prompt", job.get("name", "<unnamed>"))
                 sys.exit(1)
-            job.setdefault("model", defaults.get("model", "sonnet"))
+            job.setdefault("model", defaults.get("model", _DEFAULT_MODEL))
             job.setdefault("cost_limit_usd", 1.0)
 
         job.setdefault("timeout_seconds", defaults.get("timeout_seconds", 120))
@@ -261,15 +271,45 @@ def render_prompt(template: str, variables: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def resolve_price_alias(model: str) -> str | None:
+    """Return the price-table alias for a model name, or None when unknown.
+
+    Accepts an alias (``opus``), a full model ID (``claude-opus-5-5``), a
+    provider-prefixed ID (``us.anthropic.claude-haiku-5-5-v1:0``), and a
+    context suffix (``opus[1m]``). A name that matches no family, or more than
+    one, is unknown.
+    """
+    import re
+
+    if not isinstance(model, str):
+        return None
+    tokens = set(re.split(r"[^a-z0-9]+", model.lower()))
+    matches = [alias for alias in _COST_PER_MILLION if alias in tokens]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _most_expensive_alias() -> str:
+    """Return the alias with the highest list price."""
+    return max(
+        _COST_PER_MILLION, key=lambda alias: (_COST_PER_MILLION[alias]["output"], _COST_PER_MILLION[alias]["input"])
+    )
+
+
 def estimate_cost(model: str, stdout: str) -> float:
     """Estimate USD cost from Claude CLI output.
 
     Looks for token count lines in stdout. Falls back to a rough estimate
-    based on output length when token counts are unavailable.
+    based on output length when token counts are unavailable. A full model ID
+    is priced at its alias row. An unknown model is priced at the most
+    expensive row, so budgets fail safe. Cache reads are not priced.
     """
     import re
 
-    rates = _COST_PER_MILLION.get(model, _COST_PER_MILLION["sonnet"])
+    alias = resolve_price_alias(model)
+    if alias is None:
+        alias = _most_expensive_alias()
+        log.warning("No price row for model %r; pricing it at the %s rate", model, alias)
+    rates = _COST_PER_MILLION[alias]
 
     # Try to parse token counts from Claude CLI output
     input_match = re.search(r"input[_ ]tokens?[:\s]+(\d+)", stdout, re.IGNORECASE)
@@ -283,6 +323,8 @@ def estimate_cost(model: str, stdout: str) -> float:
         output_tokens = max(len(stdout) // 4, 100)
         input_tokens = output_tokens // 2
 
+    if input_tokens > _LONG_PROMPT_TOKENS:
+        rates = _LONG_PROMPT_COST_PER_MILLION.get(alias, rates)
     cost = (input_tokens / 1_000_000) * rates["input"] + (output_tokens / 1_000_000) * rates["output"]
     return round(cost, 6)
 
@@ -381,7 +423,7 @@ class Scheduler:
             if extra_vars:
                 variables.update(extra_vars)
 
-            model = job.get("model", "sonnet")
+            model = job.get("model", _DEFAULT_MODEL)
             timeout = job.get("timeout_seconds", 120)
 
             if runner == "command":

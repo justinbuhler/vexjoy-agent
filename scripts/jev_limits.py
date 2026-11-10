@@ -1,9 +1,11 @@
 """Documented Jev service limits and the arithmetic that keeps a program under them.
 
 Source: https://docs.typesafe.ai/models.md and https://docs.typesafe.ai/api.md
-(checked 2026-09-22). The docs say rate limits "are subject to dynamic
-adjustment": re-read the models page when a run starts failing with 429/529,
-or with 503 through Vercel AI Gateway.
+(checked 2026-09-22; models.md re-read 2026-10-16). The per-second numbers
+below are the 2026-09-22 reading: the models page now defers to the developer
+console, per organization, in tokens and requests per second. Re-read the
+console when a run starts failing with 429/529, or with 503 through Vercel AI
+Gateway.
 
 Why this module exists: a program can keep every request far under the
 64k-token request limit and still fail, because one run fans out enough
@@ -49,6 +51,12 @@ MAX_REQUEST_TOKENS = 4_500
 # each carrying the full state, sent at once with at most this many in flight:
 # floor(SAFE_FRACTION * TOKENS_PER_SECOND_LIMIT / TARGET_REQUEST_TOKENS) is 17.
 SPLIT_MAX_IN_FLIGHT = 16
+# Image requests go direct, never through the Gateway, so the Gateway-failure
+# sizes above do not apply. Splitting resends every state image, so keep images
+# whole until the documented per-request limits (64k total, 32k state + longest
+# question) get close: limit 32k, split target 24k.
+IMAGE_REQUEST_MAX_TOKENS = 32_000
+IMAGE_REQUEST_TARGET_TOKENS = 24_000
 
 
 class RequestTooLarge(ValueError):
@@ -71,16 +79,22 @@ RETRY_BASE_S = 0.5
 RETRY_MAX_S = 8.0
 
 
-def estimate_tokens(value: Any) -> int:
-    """Estimated billed input tokens for a JSON-serializable value or string."""
+def estimate_tokens(value: Any, image_tokens: dict[str, int] | None = None) -> int:
+    """Estimated billed input tokens for a JSON-serializable value or string.
+
+    ``image_tokens`` maps an image reference to its estimated tokens per use.
+    Text counts as characters; the reference string itself is tiny, and the
+    image's tokens are added once per appearance. Image bytes are never counted.
+    """
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    return math.ceil(len(text) / CHARS_PER_TOKEN)
+    extra = sum(text.count(ref) * tokens for ref, tokens in image_tokens.items()) if image_tokens else 0
+    return math.ceil(len(text) / CHARS_PER_TOKEN) + extra
 
 
-def request_tokens(state: Any, questions: dict[str, Any]) -> dict[str, int]:
+def request_tokens(state: Any, questions: dict[str, Any], image_tokens: dict[str, int] | None = None) -> dict[str, int]:
     """Token estimate for one request, split the way the documented limits are."""
-    state_tokens = estimate_tokens(state)
-    per_question = [estimate_tokens(q) for q in questions.values()] or [0]
+    state_tokens = estimate_tokens(state, image_tokens)
+    per_question = [estimate_tokens(q, image_tokens) for q in questions.values()] or [0]
     return {
         "state": state_tokens,
         "questions": sum(per_question),
@@ -232,18 +246,19 @@ def pack_questions(
     *,
     target: int = TARGET_REQUEST_TOKENS,
     max_questions: int | None = None,
+    image_tokens: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """Split ``questions`` into groups that each fit one request with the full ``state``.
 
     Order is preserved. Raises RequestTooLarge when the state plus a single
     question already passes ``target``: that state must be shrunk, not split.
     """
-    state_tokens = estimate_tokens(state)
+    state_tokens = estimate_tokens(state, image_tokens)
     groups: list[dict[str, Any]] = []
     current: dict[str, Any] = {}
     current_tokens = state_tokens
     for key, question in questions.items():
-        q_tokens = estimate_tokens(question)
+        q_tokens = estimate_tokens(question, image_tokens)
         if state_tokens + q_tokens > target:
             raise RequestTooLarge(
                 f"state plus question {key!r} is ~{state_tokens + q_tokens} tokens (target {target}); shrink the state"
@@ -259,15 +274,22 @@ def pack_questions(
     return groups
 
 
-def _merge_split_results(results: list[dict[str, Any]], groups: list[dict[str, Any]], state: Any) -> dict[str, Any]:
+def _merge_split_results(
+    results: list[dict[str, Any]],
+    groups: list[dict[str, Any]],
+    state: Any,
+    image_tokens: dict[str, int] | None = None,
+) -> dict[str, Any]:
     """Merge answers from split requests into one response shaped like a single one."""
     answers: dict[str, Any] = {}
     receipts: list[Any] = []
     attempts = retries = 0
     usage_in = usage_out = 0
     usage_complete = True
-    for result in results:
-        answers.update(result.get("answers") or {})
+    for result, group in zip(results, groups):
+        # Keep only answers to questions this request asked: a reply must not
+        # overwrite another request's answer, or add an answer nobody asked for.
+        answers.update({k: v for k, v in (result.get("answers") or {}).items() if k in group})
         meta = result.get("_meta") if isinstance(result.get("_meta"), dict) else {}
         retry = meta.get("retry") if isinstance(meta.get("retry"), dict) else {}
         attempts += int(retry.get("attempts") or 1)
@@ -290,7 +312,7 @@ def _merge_split_results(results: list[dict[str, Any]], groups: list[dict[str, A
             "split": {
                 "requests": len(groups),
                 "questions": [len(g) for g in groups],
-                "estimated_tokens": [request_tokens(state, g)["total"] for g in groups],
+                "estimated_tokens": [request_tokens(state, g, image_tokens)["total"] for g in groups],
             },
         },
     }
@@ -309,20 +331,22 @@ def split_and_run(
     limit: int = MAX_REQUEST_TOKENS,
     target: int = TARGET_REQUEST_TOKENS,
     max_in_flight: int = SPLIT_MAX_IN_FLIGHT,
+    image_tokens: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Send one request when it fits ``limit``; otherwise split it into as many as it takes.
 
     ``send_one(state, questions)`` sends one request and returns its response.
     Split requests each carry the full state and are sent at once (at most
     ``max_in_flight`` in flight); answers are merged. Any failed request raises,
-    so partial answers are never returned as complete. Raises RequestTooLarge,
+    so partial answers are never returned as complete. ``image_tokens`` prices
+    image references (see ``estimate_tokens``). Raises RequestTooLarge,
     without sending, only when the state plus a single question passes ``target``.
     """
-    if request_tokens(state, questions)["total"] <= limit:
+    if request_tokens(state, questions, image_tokens)["total"] <= limit:
         return send_one(state, questions)
-    groups = pack_questions(state, questions, target=target)
+    groups = pack_questions(state, questions, target=target, image_tokens=image_tokens)
     from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor(max_workers=max(1, min(len(groups), max_in_flight))) as pool:
         results = list(pool.map(lambda group: send_one(state, group), groups))
-    return _merge_split_results(results, groups, state)
+    return _merge_split_results(results, groups, state, image_tokens)

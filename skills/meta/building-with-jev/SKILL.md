@@ -1,7 +1,7 @@
 ---
 name: building-with-jev
 description: "Write, compose, integrate, and improve programs that call Jev, TypeSafe's System One judgment model."
-user_invocable: false  # default -- router-dispatched, not user-typed
+user-invocable: false  # default -- router-dispatched, not user-typed
 routing:
   force_route: true
   triggers:
@@ -53,12 +53,17 @@ Prefer direct judgments over supplied evidence. Bounded action selection is vali
 | `max_tokens_exceeded`, large inputs, batching, truncation, untrusted text in state | `references/state-and-budget.md` | Fitting stages, batching, bounds, adversarial state |
 | any production Jev call: request size, run budget, parallelism, retries, caching, logging, failure diagnosis | `skills/shared-patterns/jev-production-lessons.md` | The concrete rules and checklist; read before shipping |
 | 429, 529, Gateway 503, rate limits, tokens per second, concurrency, fan-out size, retries, eval pacing, "works locally but fails in production" | `references/state-and-budget.md` (Rate limits), `references/improve-and-calibrate.md` (Service failure or wrong design) | Per-second pricing, pacing, backoff numbers, and the diagnosis order |
+| model alias, `jev-latest`, `jev-preview`, pin a version, deprecation, long context, status codes, retry headers, SDK, official TypeSafe skill | `references/models-and-limits.md` | Aliases, limits, danger-zone headers, errors, retry rules |
+| quality or taste goal, hill-climb, Score ladder, before/after rounds, keep/revert, reference anchors, reporting `confidence` or split probabilities | `references/hill-climbing.md` | Owner's hill-climbing method and how to read confidence |
+| cookbook technique: beam search, parent fallback, uncertain band, rerank, guardrails, memory gate, entity match, feature discovery, argmax, smoothing | `references/cookbook-techniques.md` | One row per documented technique, with the shape and the numbers |
 | fan-out, confidence gates, composite scores, taxonomy walks, cascades, second requests, long horizon, multi-step, agent loop, beam, branching, checkpoint | `references/composition-patterns.md` | Docs patterns plus ours, with script paths as worked examples |
 | hooks, reader/storage/action, fail modes, persistence, calibration store | `references/integration-lifecycle.md` | Where a call lives and what happens when Jev is down |
 | wrong answers, low confidence, clustered scores, revision discipline, known debt, baseline, OOD, holdout | `references/improve-and-calibrate.md` | Symptom table and labeled-example loop |
 | dissolving a skill, replacing an LLM with Jev, three-tier classification | `references/dissolving-a-skill.md` | Method, phase table, worked example |
 | decision surface, card, gate design, threshold, what numbers mean, failure behavior, versions | `references/decision-card.md` | Decision card template: fields every gate must define before code ships |
 | position of a judgment, operand, gate, post-judge, selector, verifier, logical operators, dissolve a skill phase | `references/composition-positions.md` | 11 positions a judgment can occupy relative to a function, mapped to our scripts, with the walk-the-positions procedure |
+| image, screenshot, rendered frame, reference picture, Box question, `JevImage` | `references/images.md` | Send images through the transport: limits, preparation, token cost, visual hill-climb anchors |
+| game review, improve a game, per-screen questions, question bank, fun, juice, clarity, flow, session review | `references/game-review-questions.md` | About 60 Noul, Score, and Choice questions per screen, action, flow, and session, with the code checks to run beside them |
 | iteratively improve a skill, rubric, prompt, policy, or other artifact with broad Jev feedback | `references/iteration-with-jev.md` | Controlled A/B iteration, wide independent question batteries, variance checks, stopping rules, and avoiding optimization artifacts |
 | model limitations, version changes, or a failure-mode audit | `references/question-design.md`, `references/state-and-budget.md`, `references/primitives.md`, `references/improve-and-calibrate.md` | Literal wording, arithmetic and dates, indirection, state filtering, hostile state, structural invariants, generation boundaries, and labeled retesting |
 
@@ -67,11 +72,12 @@ Prefer direct judgments over supplied evidence. Bounded action selection is vali
 The TypeSafe docs are the source of truth for the API, SDKs, models, limits, and prices. Read them as part of the task; this skill carries our build procedure and measured lessons.
 
 - Start at the [documentation index](https://docs.typesafe.ai/llms.txt). Append `.md` to a page path for Markdown.
-- Read the jaggedness page for the exact model version you deploy. Pin that version; when it changes, reread the page and rerun the labeled set before reusing thresholds.
-- Before you write an integration, read the [API page](https://docs.typesafe.ai/api.md), the page for each primitive you use, and the closest cookbook. A cookbook often shows a better decomposition than a plain classifier.
-- The `typesafe:typesafe-ai` skill lists the design patterns the docs cover (route and fill arguments, select instead of generate, rerank, feature discovery, verify and escalate). Load it when you explore what to build.
+- Read the jaggedness page for the exact model version you deploy. Pin that version; when it changes, reread the page and rerun the labeled set before reusing thresholds. `jev-latest` is an alias that moves between versions (TypeSafe said it would reach 1.14.0 about a week after the 2026-10-14 release), so this toolkit pins `jev-1.14.0` and never sends the alias; `jev-preview` moves first (`references/models-and-limits.md`).
+- Before you write an integration, read the [API page](https://docs.typesafe.ai/api.md), the page for each primitive you use, and the closest cookbook. A cookbook often shows a better decomposition than a plain classifier (`references/cookbook-techniques.md`).
+- TypeSafe's own agent skill (`typesafe-ai`; install with `claude plugin marketplace add typesafe-ai/skills` then `claude plugin install typesafe@typesafe-ai`) is the better source for API shapes, the pattern catalog (route and fill arguments, select instead of generate, rerank, feature discovery, verify and escalate), and what to build. Load it when you explore a design or write against the API. Use this skill for the build procedure, the labeled run, per-second budgeting, Gateway sizing, shadow mode, and our scripts. Where they differ on request size or transport, our measured rules win; on API or pattern facts, the docs win.
 - Treat thresholds and results in cookbooks as examples to test on your data.
-- Read the documented rate limits on the models page, not just the request limits. On 2026-09-22 they were 64,000 tokens per request, 32,000 for state plus the longest question, **250,000 input tokens per second, and 1,200 requests per minute**, "subject to dynamic adjustment". `scripts/jev_limits.py` holds these numbers; update it when the page changes.
+- Rate limits are per organization and shown in the developer console; the models page no longer prints numbers. Our planning constants (`scripts/jev_limits.py`: 64,000 tokens per request, 32,000 for state plus the longest question, 250,000 input tokens per second, 1,200 requests per minute) are the 2026-09-22 reading. Update them when the console says otherwise.
+- Images, Box, and long context are "danger zone" (dreamer-ready) features behind request headers. TypeSafe does not vouch for them in production, and says every model is worse on images than on text: split image questions into the simplest parts. Never make one the only deploy gate.
 
 ## Transports
 
@@ -83,6 +89,29 @@ A program reaches Jev through one of two transports. Use Vercel AI Gateway (`JEV
 | Vercel AI Gateway | AI SDK `experimental_evaluate` with a plain model string, or `scripts/jev_vercel.py`; key is `AI_GATEWAY_API_KEY` (or OIDC on Vercel) | 429, **503**, 529 | The Gateway passes the payload to Jev verbatim. It reports upstream rate limiting or overload as HTTP 503 `GatewayInternalServerError` ("Service temporarily unavailable"), and it uses the same 503 for fast transient failures whose rate grew with tokens per request in our measurements (2026-09-22: ~1.6k tokens 0/8, ~3k 1/8, ~5k 3/8, ~13k 5/8, one request at a time). A 503 is a retry signal, not proof of an outage, a bad payload, or rate limiting; measure which before redesigning. The Gateway question type `"boolean"` is Noul. Read `providerMetadata.gateway.routing` on failures. |
 
 Both transports share the same account-level rate limits. A direct-API probe that succeeds says nothing about the Gateway path, and the reverse; a direct-key 401/402 says nothing about a Gateway-routed app.
+
+## Fallback and second-opinion modes
+
+A plain `evaluate`/`evaluate_packed` call still raises `JevTransportError` on
+failure with no alt model involved. Two scoped exceptions exist in
+`scripts/jev_transport.py` for the single named alt model in
+`scripts/jev_alt_model.py` (the Anthropic API when a key is configured, else
+the logged-in `claude -p` CLI — the same dual-backend pattern
+`jev-browser-agent.py`'s `generate_text` already uses for "ask the session's
+own model"). A caller opts into one mode explicitly; neither runs by default.
+
+| Mode | Function | When it calls the alt model | Returns |
+|---|---|---|---|
+| Availability fallback | `jev_transport.evaluate_with_fallback(state, questions, timeout=..., alt_timeout=...)` | Only after Jev raises `JevTransportError` (no credentials, network or API failure, rate-limited, oversized request) | A normal Jev-shaped response (`answers`, `_meta`). `_meta["is_jev"]` is `True` on the Jev path, `False` on the fallback path; `_meta["fallback_reason"]` is set only on the fallback path. |
+| Explicit second opinion | `jev_transport.evaluate_second_opinion(state, questions, timeout=..., alt_timeout=...)` | Always, alongside Jev, only when the caller explicitly asked for a second or different opinion | `{"jev": ..., "alt_model": ..., "_meta": {"mode": "second_opinion"}}`. Either side is `{"error": ..., "source": ...}` on its own failure; the other side's answer still returns. |
+
+Rules for both modes:
+
+- **Never silently present an alt-model answer as Jev's.** Read `_meta["is_jev"]` (fallback) or use the separate `jev`/`alt_model` keys (second opinion) before reporting a number; name the alt model in any report that uses its answer.
+- **Never merge or average the two answers.** Second-opinion mode always returns both `answers` dicts untouched; code that wants one number picks one side explicitly and says which.
+- **Never fabricate.** `evaluate_with_fallback` raises `JevTransportError` (source `"fallback_failed"`) when Jev AND the alt model both fail. `evaluate_second_opinion` reports each side's own failure; it never substitutes one side's answer for the other's.
+- **Text-only.** Neither mode supports images or Box questions; both raise `JevTransportError` (source `"images_unsupported"`) rather than silently dropping an image.
+- **Not a provider plugin architecture.** There is exactly one named alt model, no registry, no discovery, and no caller-supplied provider. A generic, model-agnostic multi-provider abstraction was already evaluated and rejected (Noul 0.09: no driving need, one provider in use). This sharper, scoped pair of modes was evaluated separately and cleared the bar (fresh Noul 0.75 worth-building, 0.04 same-as-the-rejected-abstraction, 2026-10-30) — keep it that narrow; do not grow it into a registry.
 
 ## The three tiers
 
@@ -175,7 +204,22 @@ The same procedure replaces a skill: the skill's phases supply the signals and q
 
 `score` is the probability-weighted mean of level numbers (0-based), not a picked level. A 1.0 can be certainty on level 1 or a 0/2 split; read `probabilities` when the distinction matters. Threshold, rank, or round it; never interpolate a quantity from it. A Noul at 0.5 means unsure, not "medium"; distance from 0.5 is its confidence. Do not carry a threshold tuned on one primitive to another, and do not expect `P(noul)` and `1 - P(not noul)` to agree. Full shapes: `references/primitives.md`.
 
-`confidence` on a Choice or Score measures how concentrated the distribution is. It does not say the workflow is right, and it is not permission to act. Several acceptable options also spread probability, so low confidence on a harmless preference choice is fine. Set thresholds from your labeled data and the cost of each action.
+`confidence` on a Choice or Score measures how concentrated the distribution is. It does not say the workflow is right, and it is not permission to act. Several acceptable options also spread probability, so low confidence on a harmless preference choice is fine. Set thresholds from your labeled data and the cost of each action. A Score's confidence is ordinal (adjacent levels split costs less than opposite ends); a Choice's is not. For a Choice, also try the top probability and the top-to-second ratio. Exact formulas: `references/primitives.md`. When you only need the best option, take `choice`: do not gate every answer on confidence.
+
+## Images
+
+When the goal is visual (a render, a screenshot, a frame, a reference picture), send the picture. A text description lets Jev judge the description. Describe pixels in text only when no image exists, and always add the measured numbers beside the image. Images are dreamer-ready: use them to steer hill-climbs and reviews, never as the only deploy gate. API, limits, routing, and token cost: `references/images.md`.
+
+| Put the image in | When | Example |
+|---|---|---|
+| `state` | Several questions judge the same picture. It is billed once per request. | The candidate render, the rated reference. |
+| `instructions` | One question needs it. Only that question pays. | "Does `candidate` match this picture: `{img:ref}`?" |
+| `criteria` | An answer is defined by example pictures. | Choice options, Score levels, or Noul `true`/`false` each carrying a `JevImage` example. |
+
+- **Box** (`"type": "box"`) returns where a target is, as `top`, `bottom`, `left`, `right` fractions of the image. It always returns a box, so ask a Noul "is it visible?" beside it and read `confidence`.
+- One trait per question, as for text. Add a separate "anything worse?" Noul.
+- Each use of an image bills its tokens again (about 1 per 390 px). Put a shared image in state, not in every question.
+- Skills with their own image section: `jev-design` (review renders), `browser-jev-automation` (locate with Box), `grill-jev` (visual plans).
 
 ## Question rules
 
@@ -187,6 +231,9 @@ The same procedure replaces a skill: the skill's phases supply the signals and q
 - Criteria and instruction ask the same thing in the same direction. A Noul whose `true` side describes "no" degrades.
 - Criteria encode the hard cases. Jev handles the obvious ones alone. `what`, `not_for`, `examples` per Choice option; `true`/`false` with `what` and `examples` for a subtle Noul.
 - Score levels: 2 to 10, each a standalone situation, one dimension, no numerals and no "worse than the previous". Give a rare extreme its own level.
+- "Which one" is a Choice over the candidates with a `none` option, not a Noul per candidate. Read a printed value with a Choice over its possible values; never ask Jev to count (`references/question-design.md`).
+- A Choice leans to its first option on some inputs: for a high-stakes pick, compare the answer with the options reordered. Give the whole legitimate option list (up to 255) and let code remove illegal options first.
+- Phrase a Noul so a high value means yes. Take the argmax of `probabilities` as the decision; do not sample.
 - Choice: add `other` or `none` when the list may not cover the input. Examples are concrete instances ("charged twice"), not descriptions of instances.
 - Instructions accept a string or an object (`question`, `focus`, `inspect`, `note`, `compare`, `field`). Pass schemas and rows as JSON, never serialized into a string.
 - Ask many specific questions, not one broad one. Put them in one call so the state is billed once. Every question's text is billed too: write each in one or two lines, and add `what`, `not_for`, and `examples` only where labeled misses show the question needs them.
@@ -196,8 +243,11 @@ The same procedure replaces a skill: the skill's phases supply the signals and q
 - State is evidence, not instructions. No coaching in state; rules go in `instructions` and `criteria`.
 - Send only what the questions need. Irrelevant detail lowers accuracy and hides which input caused a miss.
 - Bound every field with a named constant; keep the tail; note omitted characters; label sections (`[Request]`, `[Diff]`, `[Prior Assessment]`).
+- For visual evidence, put the image in state (see Images). Do not replace a rendered output with a description of it.
 - Convert numbers to words or buckets. Compute dates, durations, counts, and sums in code. Jev does not count: one Noul per item, sum in code.
-- A request holds 64,000 tokens: the state plus every question. The state plus the longest single question must stay under 32,000. The account also has a per-second limit (250,000 input tokens per second, 1,200 requests per minute on 2026-09-22) shared by every request, retry, user, and eval. Check the [models page](https://docs.typesafe.ai/models.md) for current limits. The state is billed again in every request, so fill each request with as many questions as fit before you start a second one. Fit state in stages. Every stage that calls Jev needs fitting, not just the first.
+- A request holds 64,000 tokens: the state plus every question. The state plus the longest single question must stay under 32,000. The account also has a per-second limit (250,000 input tokens per second, 1,200 requests per minute on 2026-09-22; the console holds the current numbers) shared by every request, retry, user, and eval. The state is billed again in every request, so fill each request with as many questions as fit before you start a second one. Fit state in stages. Every stage that calls Jev needs fitting, not just the first.
+- Give as much structured context as you can, not one signal alone (TypeSafe engineer): when a picture is part of the evidence, send the structured state JSON beside it, such as measured numbers, element tables, and field legends.
+- Name fields so they explain themselves; add a one-line legend for any opaque field (`hud.slots`: item counts in the toolbar, left to right). For a state that changes between reads, averaging a Choice's probabilities over about three reads can steady the pick (`references/cookbook-techniques.md`).
 - Keep observed facts and inferred values in separate, labeled fields. Check that the state is still current before you act on an answer about it.
 - Jev does not treat state as hostile. Text in state can steer answers. Apply `skills/shared-patterns/untrusted-content-handling.md`, name in criteria what counts, and run adversarial and self-describing test cases before deployment.
 
@@ -208,16 +258,31 @@ The same procedure replaces a skill: the skill's phases supply the signals and q
 | Speculative fan-out | every branch's questions in one call, each stating its own premise ("if this is a refund request, ..."); heads are independent and cannot see one another's answers; code ignores unused heads and their uncertainty | `scripts/jev-browser-decide.py` |
 | Confidence-gated routing | a floor below which nothing acts and a higher bar for high-stakes actions; paths act / confirm / hand off. Select both thresholds from labeled data and action costs | `scripts/jev-route.py` |
 | Composite scoring | one Score per dimension, normalize by `len(criteria) - 1`, weights in code. Weighted sums suit preferences that offset one another; an "any serious violation" rule needs its own Noul per condition | `references/composition-patterns.md` |
-| Intent routing | Choice for intent plus complexity Score, both confidence-gated | `scripts/jev-route.py` |
+| Domain attachment | one Noul per domain, attach above a 0.6 floor, code caps the count; Jev supplies evidence, code decides | `scripts/jev-route.py` |
 | Taxonomy walk | one Choice per level; each option's criteria is its trimmed subtree; follow several branches when close | `references/composition-patterns.md` |
 | Multi-Noul decomposition | split a compound goal into one Noul per clause; combine in code | `references/composition-patterns.md` |
 | Cascade plus verification | one wide request per unit; code thresholds pick survivors. Send a second request when the first answer is needed to fetch evidence, build new state, or decide the next options; it carries only what the first lacked | `references/composition-patterns.md` |
 | Bounded residual review | Jev handles most units, a fixed-answer reviewer checks benchmarked referrals; runner sends the same source-bound bundle with immutable provenance; code accepts only the declared answer schema | `references/composition-patterns.md` |
 | Deterministic pre-filter | programs decide the obvious ends; Jev judges the middle | `scripts/jev-compact.py` |
 | History injection | recent actions as "already taken, do not repeat" | `scripts/jev-browser-agent.py` |
+| Beam over Choices | keep the best `K` paths by `prod(edge_p) ** (1 / decisions)`; one more question per path in the same request | `references/cookbook-techniques.md` |
+| Parent fallback | below a confidence cutoff, report the broader parent label; no second call | `references/cookbook-techniques.md` |
+| Uncertain band | a top probability under a cutoff (or a Noul in 0.30 to 0.70) becomes `uncertain` and goes to a person | `references/cookbook-techniques.md` |
 | Checkpoint search | caller sets subgoals a few steps apart; Jev beam-searches between them with progress-comparison Choices; LLM only on a near-tie, missing answer, or stalled subgoal; a small ledger replaces raw history | `scripts/jev_search.py` |
 
 One screen each, with the code shape: `references/composition-patterns.md`.
+
+## Escalate when Jev is unsure
+
+A TypeSafe engineer's advice: escalate to a smarter model when Jev is not confident; it is slower, but better than getting stuck. Our rule:
+
+1. A Noul in 0.4 to 0.6, or a split Choice or Score, is not an answer. Make one sharpening pass: split the question, add the missing evidence, tighten criteria, and ask again on the changed state. Before you call a Choice split, merge equivalent options (or sum their mass by class), drop options the state rules out, and read the margin `p_max / p_second` (under about 2 is unstable; for a 2-option Choice under about 1.5), not a top-p bar: a flat Choice over interchangeable options means Jev has no preference (`scripts/jev_choice.py`).
+2. Consequence gating comes first, and the margin bar applies only to consequential decisions: a low-consequence or reversible pick takes the argmax at any margin (a 2-way winner Choice at 0.55/0.45 included). `scripts/jev_choice.py` holds the per-arity bar (`margin_min_for`, `is_settled`, `should_escalate`). If it is still unsure and the leading options differ in outcome cost (death, money, irreversible, owner-visible), hand that decision to a stronger model instead of re-asking or looping. If they do not differ, take the argmax or let code break the tie; a stronger model has nothing to find in a flat pick. Pick the model by the owner's model policy: Opus for code, edits and decisions, so a decision escalates to Opus; Haiku only for read-only gathering that an Opus thread judges; Sonnet is not a default for any task. Give it the same frozen evidence and a fixed answer schema.
+   After a sharpening pass, a flipped pick is not firming up. Take the sharpened pick when its margin is 2 or more and the new facts bear on the options (6 of 6 right on synthetic forks against 3 of 6 for the bare ask). If the picks differ and the sharpened answer is still flat, and the options differ in consequence, escalate, keep the escalation's pick, and log all three; if they do not differ, take the sharpened pick.
+3. This is the bounded residual review of the three tiers: a declared referral band, capped cost, and a held-out check that the lift is worth it. Log each referral with the Jev distribution that triggered it.
+4. Decisions reserved for the owner, and anything a hook or safety rule governs, do not escalate to a model: they go to the owner, and an unsure Jev stays `unknown`.
+
+Experimental features (Box, images, long context) are one signal among several, never a lone gate. For anything hard, think about the decomposition first: a TypeSafe engineer advises using a coding agent with evals to split the goal into several Jev calls and programmatic steps instead of pushing too much into one step. Have the agent propose two or three decompositions, run each on the labeled set, and keep the one that wins on the combined score.
 
 ## Integration lifecycle
 

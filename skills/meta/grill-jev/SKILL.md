@@ -53,7 +53,7 @@ Generate a context-specific Jev interrogation battery against a plan, spec, desi
 ## When to invoke
 
 - User says "grill this", "validate my plan", "find holes in my spec", "sanity check", "stress test this", "50 questions", "interrogate", "grill-jev"
-- **Automatically after any planning output.** When a plan, spec, or design is produced — before execution begins — pass it through grill-jev. Any structured output with phases, steps, or checklist items qualifies.
+- **When you are genuinely unsure a plan, spec, or design holds**, before execution begins. Not automatically after every plan: the owner (2026-10-26), "jev is like a guide rail when you are legitimately unsure. if you are sure, just make the decisions".
 - When the user says "does this look right", "approve this", "is this ready", "review my plan"
 
 ## How it works
@@ -115,15 +115,74 @@ Generate questions covering these nine areas, weighted by what the artifact cont
 | Security & safety | auth, data exposure, destructive operations |
 | Cost & throughput | calls, tokens, and requests per run and per second against the provider's documented rate limits; fan-out size; concurrency; retry policy; eval cost |
 
+## Visual goals
+
+When the plan or artifact has a visual goal, require a rendered candidate and a reference image in the state instead of a description. If either is missing, that is the first finding. Load `references/visual-plans.md` for the state, the question set, and the code. Judge screenshots with `scripts/grill-jev.py --image` (below). Other visual batteries go through `jev_transport.evaluate`. API and limits: [images.md](../building-with-jev/references/images.md).
+
+## Images and screenshots
+
+`--image [NAME=]PATH` (repeat) and `--images-dir DIR` (png, jpg, jpeg, webp, named by file stem) add images. The script prepares each (resize, encode) and forces the direct Jev API. It needs `TYPESAFE_API_KEY`; without it the run exits 2 with one line, and never tries Vercel. `--file` and `--text` are optional when images are given.
+
+Grill these screenshots for clarity and misleading panels:
+
+```bash
+python3 scripts/grill-jev.py --images-dir shots/ --questions-file /tmp/grill-questions.json \
+  --context "audience: on-call SRE; each image is a Grafana dashboard"
+python3 scripts/grill-jev.py --image home=home.png --image cpu=cpu.png --questions-file /tmp/grill-questions.json
+```
+
+Each question picks its images in `--questions-file`. Both forms are optional and combine:
+
+```json
+{"questions": {
+  "cpu_panel_misleading": {"type": "noul", "report_when": "true", "images": ["cpu"],
+    "instructions": {"question": "Does the CPU panel imply load the data does not show?"}},
+  "home_vs_cpu_units": {"type": "noul", "report_when": "true",
+    "instructions": {"question": "Do {img:home} and {img:cpu} label the same unit differently?"}}
+}}
+```
+
+- `"images": [names]` sends those images in `state.images` (key = name). The field is removed before the question reaches Jev.
+- `{img:name}` in question text references the image inline; each use bills the image again. An unknown name exits 2.
+- A question with neither gets every image. If its request would pass about 24,000 tokens, it is not sent: it shows under UNANSWERED (exit 2) with the fix, add `"images"`. Without `--questions-file` and with 2+ images, the fallback battery is sent once per image (ids `id@name`) and the cost is printed on stderr.
+- Literal `{img:x}` in `--file`, `--text`, or `--context` is sent as plain text. If a batch fails, earlier answers are still reported and the rest show under UNANSWERED.
+- Requests are packed by tokens (`jev_limits.IMAGE_REQUEST_TARGET_TOKENS`); questions with the same image set share requests. Each request carries only the images its questions use, so an image is billed once per request that carries it. Overlapping sets are not merged. Few images per question keeps cost down.
+- Ask one defect kind per question (see `building-with-jev/references/images.md`). Pair image judgments with measured numbers.
+
 ## Plans that call Jev or another metered API
 
 A plan can be complete, feasible, and safe and still fail in production because one run spends the provider's per-second limit. Grill it on arithmetic, not just on prose:
 
 0. **Check it against the rules.** Load `skills/shared-patterns/jev-production-lessons.md` and turn every unticked pre-ship checklist item into a `cost_` Noul with `report_when: "false"`. Name the exact number in the question: "Does the plan keep every request at or under 4k tokens or a measured reliable size?", "Does it send each stage's requests at once, with an instance cap near floor(0.25 × 250,000 / tokens_per_request)?", "Does it set attempts, per-attempt timeout, run deadline, and a retry budget near 4 × requests × failure rate?"
 1. **Price it first.** When the artifact calls Jev, build (or ask for) a JSON of every request one run sends and run `python3 scripts/jev-budget-check.py --payload run.json --concurrency C --concurrent-runs N --attempts A`, plus `--eval-cases N` for any eval the plan runs. A `fail` is a high-signal finding on its own; a `warn` goes in the report. Put the check's summary in state under `budget` so battery questions can inspect it.
-2. **Ask about throughput explicitly.** Include Cost & throughput questions (see `references/question-battery.md`): does the plan state tokens per run and per second against the documented limits (250,000 input tokens per second and 1,200 requests per minute for Jev on 2026-09-22)? Does it fan full detail out over every unit, or cascade? Is in-flight concurrency capped? Do retries use jittered exponential backoff with a per-run budget? Is the eval priced and paced? Which errors mean "back off" on the production transport (Vercel AI Gateway reports upstream overload as 503)?
+2. **Ask about throughput explicitly.** Include Cost & throughput questions (see `references/question-battery.md`): does the plan state tokens per run and per second against the account's rate limits (250,000 input tokens per second and 1,200 requests per minute on 2026-09-22; the TypeSafe console holds the current numbers)? Does it fan full detail out over every unit, or cascade? Is in-flight concurrency capped? Do retries use jittered exponential backoff with a per-run budget? Is the eval priced and paced? Which errors mean "back off" on the production transport (Vercel AI Gateway reports upstream overload as 503)?
 3. **Treat "each request fits" as unproven.** A plan that shows every request under the per-request limit has not shown the run fits. Look for the per-second number.
 4. **Diagnoses need measurements.** When the artifact explains a failure (an outage, a size cap, a bad payload), ask whether it measured the run's own rate and retry count and tested a small known-good request on the same transport before concluding.
+
+## Alt-model fallback and second opinion: not used here
+
+`scripts/grill-jev.py` calls `jev_transport.evaluate` directly and deliberately
+stays Jev-only: when a tiny probe also fails, Jev is down and the run stops
+(see "How it works," step 3). It does not call `evaluate_with_fallback` or
+`evaluate_second_opinion` (`building-with-jev`, "Fallback and second-opinion
+modes") — a 50-question interrogation battery answered by the alt model
+instead of Jev is a different, unvalidated review quality, not a drop-in
+substitute. If a caller wants a second or different opinion on one specific
+finding from a grill-jev run, ask it as its own Noul/Choice/Score question
+through `evaluate_second_opinion` directly, and report the alt model's answer
+labeled and separate from Jev's, never folded into the grill-jev findings list.
+
+## Plans that use Jev's judgments
+
+A plan whose steps call Jev can fail on the questions rather than the volume. Grill it on the model's known edges (`skills/meta/building-with-jev/references/question-design.md`, Known model edges), as Noul or Choice questions with named evidence:
+
+- Does any Jev question ask for counting, arithmetic, date order, or a magnitude read from a `score`? Code should.
+- Is any question a compound of several judgments, or a "which one" asked as a Noul per candidate? Split it, or use a Choice with `none`.
+- Does a Choice lean on option order, with no reversed-order check for a high-stakes pick?
+- Does the plan pin a versioned model ID (this toolkit pins `jev-1.14.0`), or does it use `jev-latest`, which moves between versions? A threshold tuned on one version needs a rerun on the next.
+- Does it gate on `confidence` for every answer, where taking the best option would do? Does it treat a Noul near 0.5 as "medium"?
+- Does it put untrusted text in state with no criteria naming what counts as evidence?
+- Does it depend on images, Box, or long context, which TypeSafe labels non-production, as the only gate?
 
 ## Question generation prompt
 
@@ -147,7 +206,8 @@ For each question, choose the most appropriate Jev primitive:
   realism, detection speed.
 
 Use array compare instructions when two or more fields in the state
-need to be compared side by side.
+need to be compared side by side. Score levels are situations, 2 to 10 of them;
+phrase every Noul so a high value means yes; ask "which one" as a Choice.
 
 Focus questions on the actual content of the artifact. A plan with no
 database steps needs no database migration questions. A plan with a
@@ -181,7 +241,7 @@ The executing LLM owns question generation; the script only evaluates a supplied
 ## Output
 
 ```
-GRILL-JEV FINDINGS — mode: plan — 31 questions (generated)
+GRILL-JEV FINDINGS — mode: plan — 31 questions (questions file)
 ============================================================
 HIGH SIGNAL (requires attention):
   [completeness/has_success_criteria] noul=0.89 TRUE — no measurable success criteria
@@ -258,11 +318,11 @@ OVERALL READINESS: 1.4/3 — partially complete; address findings before executi
 }
 ```
 
-Question-authoring guide: `references/question-battery.md`.
+Question-authoring guide: `references/question-battery.md`. Visual goals: `references/visual-plans.md`.
 
 ## Integration into planning workflows
 
-Any skill or agent that produces a plan should call grill-jev before declaring it complete:
+A skill or agent that produces a plan calls grill-jev when the user asks for it or when it is genuinely unsure the plan holds. When it is sure, it decides and says why:
 
 ```python
 import subprocess

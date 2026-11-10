@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hook-version: 1.0.0
+# hook-version: 1.0.3
 """
 PostToolUse Hook: Usage Tracking for Skills and Agents
 
@@ -13,6 +13,25 @@ Design Principles:
 - SQLite for robust storage
 """
 
+import sys  # vexjoy-pyguard
+
+if sys.version_info < (3, 10):  # vexjoy-pyguard advisory
+    import os
+
+    if not os.environ.get("VEXJOY_PYGUARD_REEXEC"):
+        os.environ["VEXJOY_PYGUARD_REEXEC"] = "1"
+        for _d in [*os.environ.get("PATH", "").split(os.pathsep), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
+            for _v in ("14", "13", "12", "11", "10"):
+                _p = os.path.join(_d, "python3." + _v)
+                if _d and "/shims" not in _d and os.access(_p, os.X_OK):
+                    os.execv(_p, [_p, *sys.argv])
+    sys.stderr.write(
+        "[vexjoy] hook %s needs Python 3.10+, got %s (%s); run ./install.sh in vexjoy-agent from a terminal"
+        " outside Claude Code (gated tool calls stay blocked until then)\n"
+        % (__file__.rsplit("/", 1)[-1], sys.version.split()[0], sys.executable)
+    )
+    sys.exit(0)
+
 import json
 import os
 import sys
@@ -23,9 +42,16 @@ sys.path.insert(0, str(Path(__file__).parent / "lib"))
 from hook_utils import hook_error
 from stdin_timeout import read_stdin
 
+_BYPASS_ENV = "USAGE_TRACKER_BYPASS"
+
 
 def main():
     """Process PostToolUse events, recording Skill and Agent invocations."""
+    if os.environ.get(_BYPASS_ENV) == "1":
+        if os.environ.get("CLAUDE_HOOKS_DEBUG"):
+            print("[usage-tracker] Bypassed via USAGE_TRACKER_BYPASS=1", file=sys.stderr)
+        sys.exit(0)
+
     try:
         event_data = read_stdin(timeout=2)
         if not event_data:
@@ -41,7 +67,7 @@ def main():
         from hook_utils import get_project_dir, get_session_id
         from usage_db import record_agent, record_skill
 
-        session_id = get_session_id()
+        session_id = get_session_id(event)
         project_path = str(get_project_dir())
         # PostToolUse events carry input under "tool_input" or "input"
         # depending on harness version; try both so the skill name is never

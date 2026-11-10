@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-# hook-version: 2.0.0
+# hook-version: 2.1.0
 """SessionStart hook: run ``vexinstall sync --target all`` from the toolkit repo.
 
 Thin, fail-open wrapper (installer spec 5.1). The engine in scripts/vexinstall
 does every install, ledger, settings, and index write; this hook only decides
 whether to call it and relays its one summary line, for example
 ``[sync] claude: +2 ~1 -0, 71 skills, 0 collisions; codex: ...``.
+
+Before that, it prints one ``[sync] warning`` line when git still runs the
+pre-engine post-merge hook for the checkout (``vexinstall.githooks``), in
+worktree sessions too. It never rewrites the hook.
 
 Skips (exit 0, at most one stderr line) when:
 - cwd is not a toolkit checkout (no skills/, agents/, hooks/);
@@ -19,6 +23,25 @@ Any error or timeout prints one warning and exits 0.
 """
 
 from __future__ import annotations
+
+import sys  # vexjoy-pyguard
+
+if sys.version_info < (3, 10):  # vexjoy-pyguard advisory
+    import os
+
+    if not os.environ.get("VEXJOY_PYGUARD_REEXEC"):
+        os.environ["VEXJOY_PYGUARD_REEXEC"] = "1"
+        for _d in [*os.environ.get("PATH", "").split(os.pathsep), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
+            for _v in ("14", "13", "12", "11", "10"):
+                _p = os.path.join(_d, "python3." + _v)
+                if _d and "/shims" not in _d and os.access(_p, os.X_OK):
+                    os.execv(_p, [_p, *sys.argv])
+    sys.stderr.write(
+        "[vexjoy] hook %s needs Python 3.10+, got %s (%s); run ./install.sh in vexjoy-agent from a terminal"
+        " outside Claude Code (gated tool calls stay blocked until then)\n"
+        % (__file__.rsplit("/", 1)[-1], sys.version.split()[0], sys.executable)
+    )
+    sys.exit(0)
 
 import os
 import subprocess
@@ -62,6 +85,19 @@ def transient_reason(repo: Path, scripts_dir: Path) -> str | None:
     return None
 
 
+def legacy_hook_warning(repo: Path, scripts_dir: Path) -> str | None:
+    """One warning line when git runs a pre-engine post-merge for *repo*, else None. Never raises."""
+    try:
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        from vexinstall import githooks
+
+        found = githooks.find_legacy_post_merge(repo)
+    except Exception:  # advisory only: an older engine or a git error skips the warning
+        return None
+    return f"[sync] warning: legacy git hook {found.path}: {found.advice}" if found else None
+
+
 def build_command(repo: Path, scripts_dir: Path) -> tuple[list[str], dict[str, str]]:
     """``python3 -m vexinstall sync --target all`` argv and env for *repo*."""
     scripts = str(scripts_dir)
@@ -80,6 +116,10 @@ def run(repo: Path) -> int:
     if home_inside(repo):
         print(f"[sync] skipped: HOME resolves inside {repo}; not syncing into the repo", file=sys.stderr)
         return 0
+    # Before the transient skip: a linked worktree runs the main checkout's hooks.
+    warning = legacy_hook_warning(repo, scripts)
+    if warning:
+        print(warning)
     reason = transient_reason(repo, scripts)
     if reason:
         print(f"[sync] skipped: {reason} ({repo}); not syncing", file=sys.stderr)
@@ -103,8 +143,16 @@ def run(repo: Path) -> int:
     return 0
 
 
+_BYPASS_ENV = "SYNC_TO_USER_CLAUDE_BYPASS"
+
+
 def main() -> int:
     """Hook entry point: always exit 0."""
+    if os.environ.get(_BYPASS_ENV) == "1":
+        if os.environ.get("CLAUDE_HOOKS_DEBUG"):
+            print("[sync-to-user-claude] Bypassed via SYNC_TO_USER_CLAUDE_BYPASS=1", file=sys.stderr)
+        sys.exit(0)
+
     try:
         return run(Path.cwd())
     except Exception as exc:  # fail open: a broken sync must never block a session

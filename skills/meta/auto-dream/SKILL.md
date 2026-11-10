@@ -74,7 +74,7 @@ python3 ~/.claude/scripts/crontab-manager.py list
 
 ## Cost estimate
 
-~0.09 USD per nightly run with 50 memory files (~20-30K input tokens at Sonnet pricing). ~33 USD/year for automated overnight operation. Budget capped at 3.00 USD/run via wrapper script.
+~0.18 USD per nightly run with 50 memory files (~20-30K input tokens at Opus 5.5 list price; the wrapper passes `--model opus`). ~66 USD/year for automated overnight operation. Budget capped at 3.00 USD/run via wrapper script.
 
 ## Cron setup
 
@@ -102,7 +102,7 @@ Note: schedule uses 2:07 AM (off-minute) per cron best practice — avoids load 
 
 ## Wrapper script details
 
-`scripts/auto-dream-cron.sh` follows the established headless cron pattern (see `skills/content/reddit-moderate/scripts/reddit-automod-cron.sh`):
+`scripts/auto-dream-cron.sh` follows the established headless cron pattern (see `skills/content/content/scripts/reddit-moderate/reddit-automod-cron.sh`):
 - `flock` lockfile prevents concurrent runs
 - `--permission-mode auto` (never `--dangerously-skip-permissions`)
 - `--max-budget-usd 3.00` caps spend per run

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hook-version: 1.0.0
+# hook-version: 1.0.3
 """
 UserPromptSubmit Hook: Capture review false-positive signals.
 
@@ -12,8 +12,28 @@ Tries to extract reviewer agent name and source file from the prompt
 the `record-review-fp` subcommand in scripts/learning-db.py.
 """
 
+import sys  # vexjoy-pyguard
+
+if sys.version_info < (3, 10):  # vexjoy-pyguard advisory
+    import os
+
+    if not os.environ.get("VEXJOY_PYGUARD_REEXEC"):
+        os.environ["VEXJOY_PYGUARD_REEXEC"] = "1"
+        for _d in [*os.environ.get("PATH", "").split(os.pathsep), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
+            for _v in ("14", "13", "12", "11", "10"):
+                _p = os.path.join(_d, "python3." + _v)
+                if _d and "/shims" not in _d and os.access(_p, os.X_OK):
+                    os.execv(_p, [_p, *sys.argv])
+    sys.stderr.write(
+        "[vexjoy] hook %s needs Python 3.10+, got %s (%s); run ./install.sh in vexjoy-agent from a terminal"
+        " outside Claude Code (gated tool calls stay blocked until then)\n"
+        % (__file__.rsplit("/", 1)[-1], sys.version.split()[0], sys.executable)
+    )
+    sys.exit(0)
+
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -104,7 +124,17 @@ def extract_source_file(text: str) -> str:
     return path.lstrip("/") or "unknown"
 
 
+_BYPASS_ENV = "REVIEW_FALSE_POSITIVE_CAPTURE_BYPASS"
+
+
 def main():
+    if os.environ.get(_BYPASS_ENV) == "1":
+        if os.environ.get("CLAUDE_HOOKS_DEBUG"):
+            print(
+                "[review-false-positive-capture] Bypassed via REVIEW_FALSE_POSITIVE_CAPTURE_BYPASS=1", file=sys.stderr
+            )
+        sys.exit(0)
+
     try:
         # Empty stdin is a normal condition, not a failure: read_stdin returns ""
         # on a 2s timeout or a closed pipe, and smoke tests invoke the hook with
@@ -122,7 +152,7 @@ def main():
             empty_output(EVENT_NAME).print_and_exit()
 
         cwd = hook_input.get("cwd") or str(Path.cwd())
-        session_id = hook_input.get("session_id") or get_session_id()
+        session_id = get_session_id(hook_input)
         window = prompt[:500]
 
         for pattern in FP_PATTERNS:

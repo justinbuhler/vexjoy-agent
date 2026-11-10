@@ -13,7 +13,7 @@ session starts -> prompt submitted -> tool selected -> tool runs -> response sto
 
 context compaction: PreCompact -> compact -> PostCompact
 subagent lifecycle: SubagentStart -> SubagentStop
-session outcomes:   Stop | StopFailure
+session outcomes:   Stop | StopFailure | SessionEnd
 ```
 
 The installed configuration currently uses these events:
@@ -30,8 +30,9 @@ The installed configuration currently uses these events:
 | `SubagentStop` | When a subagent finishes | Check completion state and record outcomes |
 | `Stop` | After a normal response cycle ends | Persist summaries and resolve pending state |
 | `StopFailure` | When a session ends because of an API error | Record failure metadata |
+| `SessionEnd` | When the session ends | Resolve every routing outcome still pending |
 
-`PreToolUse` hooks may block a tool call; advisory hooks allow it to continue. Other events have event-specific response contracts. Check the corresponding script and tests before changing exit behavior or output fields.
+`PreToolUse` hooks may block a tool call; advisory hooks allow it to continue. Other events have event-specific response contracts. No toolkit `Stop` or `SubagentStop` hook blocks today: `subagent-completion-guard` prints a PreToolUse-style deny, which `SubagentStop` ignores. [Gates in Every Repo](../docs/start-here.md#gates-in-every-repo) lists the hooks that do block and what each one blocks. Check the corresponding script and tests before changing exit behavior or output fields.
 
 ## Organization
 
@@ -41,7 +42,7 @@ Hook filenames describe their position and purpose:
 - `precompact-*` and `postcompact-*` run around context compression.
 - `session-*` handle session startup, context, or summaries.
 - `routing-*` record and resolve request-routing outcomes.
-- `*-gate` hooks enforce a condition; advisory scanners report without blocking.
+- `*-gate` hooks enforce a condition; advisory scanners report without blocking. `pretool-dispatch-spec-gate` is the exception: it only warns unless `DISPATCH_SPEC_GATE_MODE=deny` is set.
 - Files in [`lib/`](lib/) provide shared input handling, output formatting, telemetry, and database access.
 
 Some files remain as compatibility stubs after their behavior moved elsewhere. A stub should say so in its module documentation and should not be inferred to be active merely because the file exists. Registration in [`.claude/settings.json`](../.claude/settings.json) determines whether a hook runs.
@@ -59,6 +60,18 @@ The active hook set includes four broad kinds of behavior:
 
 Use the registration file rather than this table when you need an exhaustive list. Historical implementation notes are retained in [`docs/legacy.md`](docs/legacy.md); they are background, not the current inventory.
 
+## Bypass
+
+Every hook reads an environment variable that turns it off, so a misbehaving hook never needs a `settings.json` edit. Set the variable to `1` in the environment that launches Claude Code, and the hook exits 0 with no output.
+
+```bash
+SESSION_CONTEXT_BYPASS=1 claude
+```
+
+The default name is the hook filename in upper case, with `-` replaced by `_`, plus `_BYPASS`: `hooks/session-context.py` reads `SESSION_CONTEXT_BYPASS`. Older hooks keep their own names, such as `BRANCH_SAFETY_BYPASS`, `PLAN_GATE_BYPASS`, `VEXJOY_DRIFT_GUARD_DISABLE`, and `VEXJOY_SECURITY_REVIEW_SKIP`. Find the exact name with `grep -n "_BYPASS\|_DISABLE\|_SKIP" hooks/<hook>.py`. Set `CLAUDE_HOOKS_DEBUG=1` to print a line to stderr when a bypass fires.
+
+A new hook must follow the same pattern: a module constant `_BYPASS_ENV = "<HOOK_NAME>_BYPASS"`, checked with `os.environ.get(_BYPASS_ENV) == "1"` at the top of `main()`. [`tests/test_every_hook_has_bypass.py`](tests/test_every_hook_has_bypass.py) fails when any `hooks/*.py` lacks one. `voice-pipeline-tracker.py` is exempt because it is a CLI utility, not a hook.
+
 ## Development
 
 All hooks receive an event payload as JSON on standard input. Output and exit behavior depend on the event: use the helpers in [`lib/hook_utils.py`](lib/hook_utils.py) and safe input handling in [`lib/stdin_timeout.py`](lib/stdin_timeout.py) instead of creating a new protocol. Hooks on frequent events should target less than 50 ms unless their documented operation necessarily performs external work.
@@ -67,9 +80,10 @@ For a new hook:
 
 1. Use the `hook-development-pipeline` (`SPEC -> IMPLEMENT -> TEST -> REGISTER -> DOCUMENT`).
 2. Add focused tests under [`hooks/tests/`](tests/).
-3. Register the hook under the correct event and matcher in [`.claude/settings.json`](../.claude/settings.json).
-4. Run the hook tests and health checks.
-5. Benchmark hooks that run on prompts or tool calls.
+3. Add a bypass env var (see Bypass).
+4. Register the hook under the correct event and matcher in [`.claude/settings.json`](../.claude/settings.json).
+5. Run the hook tests and health checks.
+6. Benchmark hooks that run on prompts or tool calls.
 
 Useful checks:
 

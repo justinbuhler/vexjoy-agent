@@ -124,12 +124,12 @@ when creating, evaluating, redesigning, or modifying the skill.
 
 **Frontmatter** -- name, description, routing metadata. Description caps: 60 chars max for non-invocable skills, 120 chars for user-invocable. No "Use when:", "Use for:", or "Example:" in the description. The `/do` router has its own routing tables.
 
-**`user_invocable` default is `false`.** New skills are agent-facing by default:
+**`user-invocable` default is `false`.** New skills are agent-facing by default:
 the `/do` router dispatches them, and the user never types the skill name. Emit
 the frontmatter field explicitly so the default is visible:
 
 ```yaml
-user_invocable: false  # default -- router-dispatched, not user-typed
+user-invocable: false  # default -- router-dispatched, not user-typed
 ```
 
 Flipping to `true` requires an explicit justification comment in the
@@ -137,7 +137,7 @@ frontmatter naming the user-facing trigger phrases and why routing through
 `/do` is insufficient. Example:
 
 ```yaml
-user_invocable: true  # justification: users type "/pr-workflow" directly as
+user-invocable: true  # justification: users type "/pr-workflow" directly as
                       # a slash-command entry point; /do dispatch is bypassed
                       # because the user is already scoped to the PR lifecycle.
 ```
@@ -461,7 +461,7 @@ Evaluation has three tiers, applied in order:
 
 **Tier 3: Human review (optional)** -- generate the comparison viewer:
 ```bash
-python3 scripts/eval_compare.py path/to/workspace
+python3 ~/.claude/skills/toolkit/scripts/skill-creator/eval_compare.py path/to/workspace
 open path/to/workspace/compare_report.html
 ```
 

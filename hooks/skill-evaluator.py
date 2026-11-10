@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hook-version: 1.0.0
+# hook-version: 1.0.1
 """
 UserPromptSubmit Hook: Dynamic Skill/Agent Evaluation
 
@@ -79,7 +79,7 @@ SKILL_ROUTING = {
     "pr-miner": "Mine PR comments for coding standards",
     "pr-mining-coordinator": "Coordinate PR mining operations",
     # Process
-    "workflow-orchestrator": "Multi-step tasks, brainstorming, planning",
+    "workflow": "Multi-step tasks, brainstorming, planning",
     "verification-before-completion": "Multiple validation layers before done",
     "read-only-ops": "Exploration and reporting without modifications",
     # skill-composer: demoted to workflow
@@ -158,7 +158,7 @@ def get_evaluation_prompt(complexity: str) -> str:
 - Code Review: systematic-code-review, systematic-debugging, systematic-refactoring
 - Quality Gates: go-patterns, python-quality-gate, universal-quality-gate
 - Git: pr-workflow (umbrella: commit, codex-review, sync, status, fix, cleanup, miner, branch-name, ci-check)
-- Process: workflow-orchestrator, verification-before-completion, test-driven-development
+- Process: workflow, verification-before-completion, test-driven-development
 - Analysis: codebase-overview, agent-evaluation
 - Cleanup: code-cleanup, comment-quality, code-linting"""
 
@@ -211,6 +211,9 @@ def should_skip(prompt: str) -> bool:
     return bool(prompt_lower.endswith("?") and len(prompt_lower) < 50)
 
 
+_BYPASS_ENV = "SKILL_EVALUATOR_BYPASS"
+
+
 def main():
     """Process UserPromptSubmit hook event.
 
@@ -220,6 +223,11 @@ def main():
     routing guidance injected. The Agent tool descriptions in the system
     prompt already list all available agents.
     """
+    if os.environ.get(_BYPASS_ENV) == "1":
+        if os.environ.get("CLAUDE_HOOKS_DEBUG"):
+            print("[skill-evaluator] Bypassed via SKILL_EVALUATOR_BYPASS=1", file=sys.stderr)
+        sys.exit(0)
+
     return
 
 

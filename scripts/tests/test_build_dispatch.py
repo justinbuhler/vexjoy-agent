@@ -7,7 +7,7 @@ Covers:
   complexity, model, health gate inputs (numeric and `health=-`), alts, stack.
 - Model enforcement: required for medium/complex, optional for trivial/simple.
 - Preamble completeness and block order: marker first, exact Skill-tool calls,
-  then thinking directive, token line, Task Specification, the 4 mandatory injections,
+  then thinking directive, token line, Task Specification, the 6 mandatory injections,
   optional worktree/local-only blocks.
 - Thinking directive by complexity + slow/fast overrides.
 - Graceful degradation: missing optional fields omit their block only.
@@ -23,6 +23,7 @@ Run with: python3 -m pytest scripts/tests/test_build_dispatch.py -v
 import functools
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import time
@@ -305,11 +306,142 @@ def test_skill_calls_are_primary_first_ordered_and_deduplicated():
     ]
 
 
+@pytest.mark.parametrize("provider", ("google", "antigravity"))
+def test_skill_calls_for_google_antigravity_emit_read_skill_directive(provider):
+    decision = _decision(
+        skill="review",
+        stack=["review", "quick"],
+        provider=provider,
+    )
+    rendered = bd.render_skill_calls(decision)
+    assert "Read and follow ~/.gemini/skills/review/SKILL.md before starting work." in rendered
+    assert "Operational Summary (review):" in rendered
+    assert "Read and follow ~/.gemini/skills/quick/SKILL.md before starting work." in rendered
+
+
+def test_render_skill_calls_without_summary_falls_back_to_reference(monkeypatch):
+    monkeypatch.setattr(bd, "get_skill_operational_summary", lambda _name: "")
+    decision = _decision(skill="pr-workflow", stack=[], provider="google")
+    calls = bd.render_skill_calls(decision)
+    assert calls == "Read and follow ~/.gemini/skills/pr-workflow/SKILL.md before starting work."
+
+
+def _review_only_alias() -> str:
+    """A one-word trigger or category of the public index that only review claims."""
+    return next(
+        a
+        for a, owners in bd._trigger_claims().items()
+        if owners == ("review",) and a != "review" and a.replace("-", "").isalnum()
+    )
+
+
+def test_trigger_phrase_and_category_alias_coerce_to_canonical_skill():
+    alias = _review_only_alias()
+    calls = bd.render_skill_calls(_decision(skill=alias, stack=[]))
+    assert calls == "Call the Skill tool with `review`."
+
+
+def test_marker_records_the_canonical_skill_for_a_coerced_alias():
+    alias = _review_only_alias()
+    first_line = _preamble(_decision(skill=alias, stack=[])).splitlines()[0]
+    assert " skill=review " in first_line + " "
+
+
+def test_coerced_alias_is_deduplicated_against_its_canonical_skill():
+    alias = _review_only_alias()
+    calls = bd.render_skill_calls(_decision(skill="review", stack=[alias]))
+    assert calls == "Call the Skill tool with `review`."
+
+
+def test_alias_to_unknown_skill_still_fails_closed():
+    with pytest.raises(bd.InputError, match="absent from"):
+        _preamble(_decision(skill="zz-no-such-trigger", stack=[]))
+
+
+# Categories several skills share, as the installed index on the owner's machine
+# carries them. "quuxcorp-ui-modding" stands in for a private overlay skill.
+SHARED_ALIAS_SKILLS = {
+    "programming": {"category": "language", "triggers": ["go test"]},
+    "quuxcorp-ui-modding": {"category": "language", "triggers": ["quuxcorp ui"]},
+    "browser-jev-automation": {"category": "infrastructure", "triggers": ["drive the browser"]},
+    "deploy": {"category": "infrastructure", "triggers": ["deploy website"]},
+    "architecture-deepening": {"category": "analysis", "triggers": ["deepen the architecture"]},
+    "assessment": {"category": "analysis", "triggers": ["explain the codebase"]},
+    "data": {"category": "analysis", "triggers": ["etl job"]},
+    "review": {"category": "code-review", "triggers": ["pr-review"]},
+}
+
+
+@pytest.fixture
+def shared_alias_index(tmp_path, monkeypatch):
+    """An installed index where three categories belong to more than one skill."""
+    index = tmp_path / "index"
+    index.mkdir()
+    (index / "skills.json").write_text(json.dumps({"skills": SHARED_ALIAS_SKILLS}), encoding="utf-8")
+    (index / "agents.json").write_text(
+        json.dumps({"agents": {"python-general-engineer": {"short_description": "Python."}}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("VEXJOY_INDEX_DIR", str(index))
+    bd._trigger_claims.cache_clear()
+    yield index
+    bd._trigger_claims.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("alias", "candidates"),
+    [
+        ("language", ["programming", "quuxcorp-ui-modding"]),
+        ("infrastructure", ["browser-jev-automation", "deploy"]),
+        ("analysis", ["architecture-deepening", "assessment", "data"]),
+    ],
+)
+def test_alias_several_skills_share_is_an_error_naming_them(shared_alias_index, alias, candidates):
+    # Coercing to the first claimant loaded an unrelated skill: "language"
+    # became a private modding skill and "infrastructure" the browser driver.
+    with pytest.raises(bd.InputError) as raised:
+        bd.render_skill_calls(_decision(skill=alias, stack=[]))
+    message = str(raised.value)
+    assert f"{alias!r}" in message
+    assert ", ".join(candidates) in message
+
+
+def test_shared_alias_in_the_stack_is_an_error_too(shared_alias_index):
+    with pytest.raises(bd.InputError, match="browser-jev-automation, deploy"):
+        bd.render_skill_calls(_decision(skill="review", stack=["infrastructure"]))
+
+
+@pytest.mark.parametrize("alias", ["pr-review", "code-review"])
+def test_alias_one_skill_claims_still_coerces(shared_alias_index, alias):
+    assert bd.render_skill_calls(_decision(skill=alias, stack=[])) == "Call the Skill tool with `review`."
+
+
+def test_cli_shared_alias_exits_2_naming_the_candidates(shared_alias_index):
+    decision = _decision(skill="infrastructure", stack=[], complexity="simple")
+    result = _run_cli("--json", json.dumps(decision), "--no-gather", "--no-record")
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "browser-jev-automation, deploy" in result.stderr
+
+
+@pytest.mark.parametrize(("skill", "stack"), [("do", []), ("d", []), ("testing", ["do"])])
+def test_router_entry_points_are_not_skill_calls(skill, stack):
+    # "Call the Skill tool with `do`" re-enters the router on the same request.
+    with pytest.raises(bd.InputError, match="router entry point"):
+        bd.render_skill_calls(_decision(skill=skill, stack=stack))
+
+
 def test_shared_pattern_stack_entry_is_not_a_skill_call():
     decision = _decision(stack=["anti-rationalization-core", "testing"])
     calls = bd.render_skill_calls(decision)
     assert "anti-rationalization-core" not in calls
     assert calls.endswith("Call the Skill tool with `testing`.")
+
+
+def test_render_skill_calls_renders_antigravity_instruction_for_google_provider():
+    decision = _decision(skill="pr-workflow", stack=[], provider="google")
+    calls = bd.render_skill_calls(decision)
+    assert "Read and follow ~/.gemini/skills/pr-workflow/SKILL.md before starting work." in calls
+    assert "Operational Summary (pr-workflow):" in calls
 
 
 @pytest.mark.parametrize("name", ["reviewer-code", "agent-upgrade", "not-a-real-component"])
@@ -450,7 +582,7 @@ def test_token_budget_reads_settings_and_defaults(tmp_path):
         {"agent": "Bad Agent!"},
         {"complexity": "low"},  # the audit's real-world invalid value
         {"complexity": ""},
-        {"model": "haiku"},  # retired model — not in VALID_MODELS
+        {"model": "haiku-3"},  # unknown model — not in VALID_MODELS
         {"health": {"confidence": 1.5}},
         {"health": {"confidence": 0.5, "action": "boost"}},
         {"health": {"confidence": 0.5, "n": -1}},
@@ -674,8 +806,8 @@ def test_exceptional_max_power_requires_explicit_override():
     marker = bd.build_marker(
         _decision(model=None, model_policy="max-power", manual_model_override=True, provider="anthropic")
     )
-    assert "model=opus" in marker
-    assert "effort=xhigh" in marker
+    assert "model=fable" in marker
+    assert "effort=high" in marker
 
 
 def test_manual_override_can_replace_a_policy_default():
@@ -769,13 +901,13 @@ SUPPLIED_CLAUDE_POINTS = {
 @pytest.mark.parametrize(
     ("task_class", "model", "effort"),
     [
-        ("low-risk", "opus", "low"),
+        ("low-risk", "haiku", "low"),
         ("standard", "opus", "medium"),
-        ("high-risk", "opus", "high"),
+        ("high-risk", "opus", "medium"),
     ],
 )
-def test_anthropic_policy_selects_opus_at_every_task_class(task_class, model, effort):
-    """Anthropic automatic task classes select Opus 5, effort rising with risk class."""
+def test_anthropic_policy_maps_tiers_to_measured_models(task_class, model, effort):
+    """Policy 2026-11-09: low-risk haiku (read-only); standard and high-risk opus/medium (owner: medium over high)."""
     decision = _decision(model=None, model_policy=task_class, provider="anthropic")
     marker = bd.build_marker(decision)
 
@@ -785,16 +917,128 @@ def test_anthropic_policy_selects_opus_at_every_task_class(task_class, model, ef
     assert recorder.parse_model_effort(marker) == effort
 
 
-def test_anthropic_policy_points_are_unmeasured_and_effort_rises_with_risk():
-    """Opus 5 carries no DeepSWE point; the policy is grounded on effort ordering."""
+def test_anthropic_policy_models_are_known_and_effort_never_falls_with_risk():
+    """Every tier names a known Claude model; effort never falls as risk rises."""
     order = ["low", "medium", "high", "xhigh", "max"]
     previous = -1
     for policy in ("low-risk", "standard", "high-risk", "max-power"):
         model, effort = bd.ANTHROPIC_AUTO_POLICIES[policy]
-        assert model == "opus", f"{policy} selects {model}, not the Opus 5 default"
-        assert (model, effort) not in SUPPLIED_CLAUDE_POINTS, f"{policy} claims a benchmark point Opus 5 does not have"
-        assert order.index(effort) > previous, f"{policy} breaks the start-low effort ordering"
+        assert model in bd.ANTHROPIC_MODELS, f"{policy} selects unknown model {model}"
+        assert order.index(effort) >= previous, f"{policy} breaks the start-low effort ordering"
         previous = order.index(effort)
+
+
+def test_anthropic_policy_sonnet_is_no_tier_default():
+    """Owner policy 2026-11-01: haiku for read-only, opus for work, sonnet for none; fable is max-power."""
+    tiers = bd.ANTHROPIC_AUTO_POLICIES
+    assert all(model != "sonnet" for model, _ in tiers.values())
+    assert tiers == {
+        "low-risk": ("haiku", "low"),
+        "standard": ("opus", "medium"),
+        "high-risk": ("opus", "medium"),
+        "max-power": ("fable", "high"),
+    }
+
+
+def test_anthropic_policy_runs_opus_at_medium_on_every_tier():
+    """Owner, 2026-11-09: "Also I prefer opus 5.5 medium over high". opus/high is no tier's default."""
+    opus_tiers = {tier: effort for tier, (model, effort) in bd.ANTHROPIC_AUTO_POLICIES.items() if model == "opus"}
+    assert opus_tiers == {"standard": "medium", "high-risk": "medium"}
+
+
+def test_explicit_opus_high_needs_no_override():
+    """opus/high stays a valid explicit pick: the escalation step after a failed opus/medium attempt."""
+    marker = bd.build_marker(_decision(model="opus", model_effort="high"))
+    assert "model=opus" in marker and "effort=high" in marker
+
+
+@pytest.mark.parametrize("policy", ("standard", "high-risk"))
+@pytest.mark.parametrize("model", (None, "opus"))
+def test_opus_high_under_a_named_tier_is_rejected_with_the_escalation_hint(policy, model):
+    """A tier never yields opus/high by itself; the error names the explicit pick and the owner order."""
+    decision = _decision(model=model, model_policy=policy, model_effort="high")
+    with pytest.raises(bd.InputError) as excinfo:
+        bd.build_marker(decision)
+    message = str(excinfo.value)
+    assert "selects opus/medium" in message
+    assert "opus medium over high" in message
+    assert "model='opus' with model_effort='high' and no model_policy" in message
+    marker = bd.build_marker({**decision, "manual_model_override": True})
+    assert "model=opus" in marker and "effort=high" in marker
+
+
+def test_escalation_hint_stays_off_other_mismatches():
+    """The opus/high hint is for that one pick; other mismatches keep the short message."""
+    for extra in ({"model_effort": "low"}, {"model": "fable", "model_effort": "high"}):
+        with pytest.raises(bd.InputError) as excinfo:
+            bd.build_marker(_decision(**{"model": None, "model_policy": "high-risk", **extra}))
+        assert "no model_policy" not in str(excinfo.value)
+    with pytest.raises(bd.InputError) as excinfo:
+        bd.build_marker(_decision(model=None, model_policy="high-risk", model_effort="high", provider="openai"))
+    assert "no model_policy" not in str(excinfo.value)
+
+
+def test_anthropic_policy_never_raises_opus_past_high():
+    """Past opus/high the ladder goes up a model at a lower effort, never to opus/xhigh or opus/max."""
+    for model, effort in bd.ANTHROPIC_AUTO_POLICIES.values():
+        assert not (model == "opus" and effort in ("xhigh", "max"))
+
+
+def _main_decision(**overrides):
+    base = {"execution": "main", "skill": "testing", "complexity": "simple", "task_spec": {"intent": "fix a typo"}}
+    base.update(overrides)
+    return base
+
+
+def test_main_thread_marker_records_agent_main_and_exec_token():
+    """Main-thread routes keep a valid, recorder-parseable marker with no fallback."""
+    marker = bd.build_marker(_main_decision())
+    assert marker == "[do-route] agent=main skill=testing complexity=simple model=inherit health=- exec=main"
+    assert recorder.parse_do_route_marker(marker) == ("main", "testing")
+    assert recorder.parse_fallback_reason(marker) is None
+
+
+def test_agent_main_implies_main_thread_execution():
+    marker = bd.build_marker({"agent": "main", "skill": "testing", "complexity": "simple"})
+    assert marker.startswith("[do-route] agent=main ") and marker.endswith(" exec=main")
+
+
+def test_main_thread_preamble_omits_worker_handoff_blocks():
+    out = _preamble(_main_decision(complexity="medium"))
+    assert out.splitlines()[0].endswith(" exec=main")
+    assert "Call the Skill tool with `testing`." in out
+    assert bd.MAIN_THREAD_NOTE in out
+    assert bd.INJ_ROUTE_FIT not in out and "Task Specification" not in out
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"model": "opus"}, {"model_policy": "standard"}, {"flags": {"worktree": True}}, {"execution": "elsewhere"}],
+)
+def test_main_thread_rejects_dispatch_only_fields(overrides):
+    with pytest.raises(bd.InputError):
+        bd.build_marker(_main_decision(**overrides))
+
+
+def test_cli_main_thread_feeds_the_recorder(tmp_path):
+    """The CLI hands main-thread markers to the real recorder; --no-record skips it."""
+    env = {
+        **os.environ,
+        "CLAUDE_LEARNING_DIR": str(tmp_path / "ld"),
+        "CLAUDE_ROUTING_STATE_DIR": str(tmp_path / "rs"),
+        "CLAUDE_CODE_SESSION_ID": "main-thread-test",
+    }
+    payload = json.dumps(_main_decision())
+    run = functools.partial(subprocess.run, capture_output=True, text=True, env=env, check=False)
+    skipped = run([sys.executable, str(SCRIPT_PATH), "--json", payload, "--no-record"])
+    assert skipped.returncode == 0 and not (tmp_path / "ld" / "route-events.jsonl").exists()
+    result = run([sys.executable, str(SCRIPT_PATH), "--json", payload])
+    assert result.returncode == 0
+    events = (tmp_path / "ld" / "route-events.jsonl").read_text().splitlines()
+    decision = json.loads(events[-1])
+    assert (decision["agent"], decision["skill"], decision["model"]) == ("main", "testing", "inherit")
+    pending = json.loads((tmp_path / "rs" / "claude-routing-outcomes-main-thread-test.json").read_text())["pending"]
+    assert pending[-1]["key"] == "main:testing"
 
 
 def test_opus_max_requires_manual_override():
@@ -815,14 +1059,76 @@ def test_supplied_points_match_the_documented_benchmark_table():
     )
 
 
-@pytest.mark.parametrize("model", ("sonnet",))
-def test_off_policy_claude_models_require_manual_override(model):
-    """Opus 5 is the default; sonnet is the manual-only pick."""
-    with pytest.raises(bd.InputError, match="manual_model_override"):
-        bd.build_marker(_decision(model=model))
-    # With manual_override they work fine
-    marker = bd.build_marker(_decision(model=model, manual_model_override=True))
+@pytest.mark.parametrize("model", ("haiku", "sonnet", "opus"))
+def test_explicit_claude_models_need_no_override(model):
+    """haiku, sonnet, and opus are all accepted explicitly; the marker and recorder carry them."""
+    marker = bd.build_marker(_decision(model=model))
     assert f"model={model}" in marker
+    assert recorder.parse_model(marker) == model
+
+
+@pytest.mark.parametrize("effort", (None, "medium", "high", "xhigh"))
+def test_explicit_fable_needs_no_override(effort):
+    """fable is accepted wherever opus is; only fable/max needs an override."""
+    marker = bd.build_marker(_decision(model="fable", model_effort=effort))
+    assert "model=fable" in marker
+    assert ("effort=" in marker) == (effort is not None)
+    assert "fable" in bd.VALID_MODELS and "fable" in bd.ANTHROPIC_MODELS
+
+
+def test_fable_marker_round_trips_through_the_recorder():
+    """The recorder (hooks/routing-decision-recorder.py) must accept the fable marker the builder emits."""
+    marker = bd.build_marker(_decision(model="fable", model_effort="high"))
+    assert recorder.parse_model(marker) == "fable"
+    assert recorder.parse_model_effort(marker) == "high"
+
+
+def test_fable_max_requires_manual_override():
+    """fable/max is an explicit escalation, as opus/max is."""
+    with pytest.raises(bd.InputError, match="fable/max requires manual_model_override"):
+        bd.build_marker(_decision(model="fable", model_effort="max"))
+    marker = bd.build_marker(_decision(model="fable", model_effort="max", manual_model_override=True))
+    assert "model=fable" in marker and "effort=max" in marker
+
+
+def test_explicit_opus_xhigh_requires_manual_override_and_points_to_fable():
+    """Past high, the next model up at a lower effort is tried before more Opus effort."""
+    with pytest.raises(bd.InputError, match="manual_model_override=true; test fable at high first"):
+        bd.build_marker(_decision(model="opus", model_effort="xhigh"))
+    marker = bd.build_marker(_decision(model="opus", model_effort="xhigh", manual_model_override=True))
+    assert "model=opus" in marker and "effort=xhigh" in marker
+
+
+def test_fable_differing_from_a_policy_tier_requires_manual_override():
+    """fable follows the opus rule: a pick that differs from the named tier needs an override and an effort."""
+    with pytest.raises(bd.InputError, match="manual_model_override"):
+        bd.build_marker(_decision(model="fable", model_policy="standard"))
+    with pytest.raises(bd.InputError, match="model_effort"):
+        bd.build_marker(_decision(model="fable", model_policy="standard", manual_model_override=True))
+    marker = bd.build_marker(
+        _decision(model="fable", model_effort="medium", model_policy="standard", manual_model_override=True)
+    )
+    assert "model=fable" in marker and "effort=medium" in marker
+
+
+@pytest.mark.parametrize("model", ("haiku", "sonnet", "opus", "fable", "inherit"))
+@pytest.mark.parametrize("complexity", ("simple", "medium", "complex"))
+def test_owner_per_task_model_override_is_recordable(model, complexity):
+    """When the owner names a model for the task, every dispatch can pass and record it."""
+    prompt = _preamble(_decision(model=model, complexity=complexity, manual_model_override=True))
+    marker = prompt.splitlines()[0]
+    assert f"model={model}" in marker
+    assert "effort=" not in marker
+
+
+def test_policy_differing_pick_still_requires_manual_override():
+    """A model that differs from the policy's tier needs manual_model_override and an effort."""
+    with pytest.raises(bd.InputError, match="manual_model_override"):
+        bd.build_marker(_decision(model="opus", model_policy="low-risk"))
+    marker = bd.build_marker(
+        _decision(model="sonnet", model_effort="medium", model_policy="low-risk", manual_model_override=True)
+    )
+    assert "model=sonnet" in marker
 
 
 def test_claude_model_effort_round_trip():
@@ -838,7 +1144,7 @@ def test_provider_absent_defaults_to_anthropic():
     """Missing provider field defaults to 'anthropic' (Claude Code is primary)."""
     decision = _decision(model=None, model_policy="standard")
     marker = bd.build_marker(decision)
-    # Should resolve via Anthropic table: opus/medium
+    # Should resolve via the Anthropic table: opus/medium (policy 2026-11-09)
     assert "model=opus" in marker
     assert "effort=medium" in marker
 
@@ -849,6 +1155,77 @@ def test_provider_openai_uses_openai_table():
     marker = bd.build_marker(decision)
     assert "model=gpt-5.6-sol" in marker
     assert "effort=high" in marker
+
+
+@pytest.mark.parametrize("provider", ("google", "antigravity"))
+@pytest.mark.parametrize(
+    ("task_class", "model", "effort"),
+    [
+        ("low-risk", "gemini-3.8-flash", "low"),
+        ("standard", "gemini-4-argon", "medium"),
+        ("high-risk", "gemini-4-argon-high", "high"),
+    ],
+)
+def test_google_antigravity_policy_maps_tiers_to_argon_and_flash(provider, task_class, model, effort):
+    """Google/Antigravity lane maps low-risk to Flash, standard to Argon, and high-risk to Argon-High."""
+    decision = _decision(model=None, model_policy=task_class, provider=provider)
+    marker = bd.build_marker(decision)
+    assert f"model={model}" in marker
+    assert f"effort={effort}" in marker
+    assert recorder.parse_model(marker) == model
+    assert recorder.parse_model_effort(marker) == effort
+
+
+@pytest.mark.parametrize("provider", ("google", "antigravity"))
+def test_google_max_power_requires_manual_override(provider):
+    """Google max-power requires manual_model_override=true."""
+    with pytest.raises(bd.InputError, match="manual_model_override"):
+        bd.build_marker(_decision(model=None, model_policy="max-power", provider=provider))
+    marker = bd.build_marker(
+        _decision(model=None, model_policy="max-power", manual_model_override=True, provider=provider)
+    )
+    assert "model=gemini-4-argon-high" in marker
+    assert "effort=max" in marker
+
+
+@pytest.mark.parametrize(
+    "model",
+    (
+        "gemini-4-argon",
+        "gemini-4-argon-low",
+        "gemini-4-argon-medium",
+        "gemini-4-argon-high",
+        "gemini-3.8-flash",
+        "gemini-3.8-flash-low",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-high",
+        "argon",
+        "flash",
+        "flash_lite",
+        "pro",
+    ),
+)
+def test_explicit_google_models_round_trip_with_recorder(model):
+    """All Google AI / Antigravity subagent and CLI models are accepted and parsed by the recorder."""
+    marker = bd.build_marker(_decision(model=model, model_effort="medium", provider="google"))
+    assert f"model={model}" in marker
+    assert "effort=medium" in marker
+    assert recorder.parse_model(marker) == model
+    assert recorder.parse_model_effort(marker) == "medium"
+
+
+def test_google_cross_provider_policy_override_rejected():
+    """Google policy cannot be overridden with a non-Google model."""
+    with pytest.raises(bd.InputError, match="Google/Gemini model"):
+        bd.build_marker(
+            _decision(
+                model_policy="standard",
+                model="opus",
+                model_effort="high",
+                manual_model_override=True,
+                provider="google",
+            )
+        )
 
 
 def test_provider_other_rejects_model_policy():
@@ -920,7 +1297,8 @@ def test_cli_model_missing_error_message():
     result = _run_cli("--json", json.dumps({"agent": "claude", "skill": "quick", "complexity": "complex"}))
     assert result.returncode == 2
     assert "'model' is required" in result.stderr
-    assert "Model Selection" in result.stderr or "sonnet" in result.stderr
+    assert "fable" in result.stderr
+    assert "standard=opus/medium" in result.stderr and "max-power=fable/high" in result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -1071,6 +1449,31 @@ def test_symlinked_script_from_non_repo_cwd_gathers_real_git_output(tmp_path):
     assert "gather:" not in result.stdout
 
 
+def test_installed_layout_with_per_skill_symlinks_validates_pipeline(tmp_path):
+    # Real install shape: skills/ holds flat per-skill symlinks (skills/workflow -> <repo>/skills/process/workflow,
+    # skills/process -> <repo>/skills/process/process), so skills/process/workflow does not exist.
+    for name in ("scripts", "agents", "hooks"):
+        (tmp_path / name).symlink_to(REPO_ROOT / name)
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    for extra in ("INDEX.json", "shared-patterns"):
+        (skills / extra).symlink_to(REPO_ROOT / "skills" / extra)
+    for category in sorted((REPO_ROOT / "skills").iterdir()):
+        if not category.is_dir() or category.name == "shared-patterns":
+            continue
+        for child in sorted(category.iterdir()):
+            if child.is_dir() and not (skills / child.name).exists():
+                (skills / child.name).symlink_to(child)
+    assert not (skills / "process" / "workflow").exists()
+    decision_file = tmp_path / "d.json"
+    decision_file.write_text(json.dumps(_decision(pipeline="explore-pipeline")))
+    result = _run_cli_from(
+        tmp_path, tmp_path / "scripts" / "build-dispatch.py", "--no-gather", "--json-file", str(decision_file)
+    )
+    assert result.returncode == 0, result.stderr
+    assert "pipeline=explore-pipeline" in result.stdout
+
+
 def test_cwd_inside_a_git_repo_picks_that_repo(tmp_path):
     repo = _git_repo(tmp_path / "repo")
     decision = _decision(task_spec={"intent": "x", "files": "tracked.md"})
@@ -1169,7 +1572,7 @@ def test_inherit_requests_no_tool_override_and_round_trips(complexity, provider)
 
 @pytest.mark.parametrize(
     "conflict",
-    [{"model_policy": "standard"}, {"model_effort": "high"}, {"manual_model_override": True}],
+    [{"model_policy": "standard"}, {"model_effort": "high"}],
 )
 def test_inherit_rejects_conflicting_overrides(conflict):
     with pytest.raises(bd.InputError, match="cannot include"):
@@ -1228,3 +1631,35 @@ def test_none_context_does_not_gather_or_drop_task_spec(tmp_path):
 def test_invalid_context_mode_fails_even_without_gather(mode):
     with pytest.raises(bd.InputError, match="context_mode"):
         _preamble(_decision(context_mode=mode))
+
+
+def test_build_subagent_dispatch():
+    decision = _decision(agent="python-general-engineer", skill="testing")
+    payload = bd.build_subagent_dispatch(decision, repo_root=REPO_ROOT)
+    assert "subagent_spec" in payload
+    assert payload["subagent_spec"]["Name"] == "python-general-engineer"
+    assert payload["define_subagent"]["EnableWriteTools"] is True
+    assert payload["invoke_subagent"]["TypeName"] == "python-general-engineer"
+    assert payload["invoke_subagent"]["Workspace"] == "branch"
+    assert "[do-route]" in payload["preamble"]
+
+
+def test_build_dispatch_cli_subagent_spec(tmp_path):
+    decision_file = tmp_path / "route.json"
+    decision = _decision(agent="reviewer-code", skill="review")
+    decision_file.write_text(json.dumps(decision), encoding="utf-8")
+
+    cmd = [
+        sys.executable,
+        str(SCRIPT_PATH),
+        "--json-file",
+        str(decision_file),
+        "--subagent-spec",
+        "--no-gather",
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT, check=False)
+    assert res.returncode == 0
+    data = json.loads(res.stdout)
+    assert data["define_subagent"]["Name"] == "reviewer-code"
+    assert data["define_subagent"]["EnableWriteTools"] is False
+    assert data["invoke_subagent"]["Workspace"] == "inherit"

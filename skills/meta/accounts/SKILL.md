@@ -45,6 +45,7 @@ Script: `scripts/manage-accounts.py`. Registry: `~/.claude-accounts/accounts.jso
 | Validate all accounts | `python3 scripts/manage-accounts.py check` |
 | Launch an account | `python3 scripts/manage-accounts.py launch <name>` |
 | Share skills, agents, commands from `~/.claude` | `python3 scripts/manage-accounts.py link [<name>]` |
+| Register toolkit hooks in every account's `settings.json` | `./install.sh` (vexinstall `apply`; see `docs/installer-layout.md`) |
 | Install/update aliases | `python3 scripts/manage-accounts.py install-aliases` |
 | Preview alias changes | `python3 scripts/manage-accounts.py install-aliases --dry-run` |
 | Remove an account | `python3 scripts/manage-accounts.py remove <name>` |
@@ -103,14 +104,16 @@ cwork --resume   # resumes the last session for the 'work' account
 ```fish
 function cwork
     set -lx CLAUDE_CONFIG_DIR "~/.claude-accounts/work"
-    claude --dangerously-skip-permissions --system-prompt="." $argv
+    claude --dangerously-skip-permissions --chrome --remote-control --system-prompt="." $argv
 end
 ```
 
 **Bash/Zsh** (`~/.bashrc` / `~/.zshrc`):
 ```bash
-alias cwork='CLAUDE_CONFIG_DIR="~/.claude-accounts/work" claude --dangerously-skip-permissions --system-prompt="."'
+alias cwork='CLAUDE_CONFIG_DIR="~/.claude-accounts/work" claude --dangerously-skip-permissions --chrome --remote-control --system-prompt="."'
 ```
+
+`install-aliases` also writes `cm0`, which starts the default profile (`~/.claude`). It runs `env -u CLAUDE_CONFIG_DIR claude ...`: it clears an inherited value and never sets one, because setting `CLAUDE_CONFIG_DIR` (even to `~/.claude`) moves Claude's state off `~/.claude.json` and breaks the default login. `cm0` is reserved; `add` rejects it.
 
 Every alias and `launch` pass `DEFAULT_CLAUDE_ARGS` from `scripts/manage-accounts.py` before your own arguments. Edit that tuple and re-run `install-aliases` to change them.
 

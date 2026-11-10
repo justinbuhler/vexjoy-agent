@@ -4,6 +4,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 
 def _load_module():
     path = Path(__file__).resolve().parents[1] / "grill-jev.py"
@@ -28,6 +30,56 @@ def test_choice_reports_only_configured_concerning_choices() -> None:
 
     assert not grill._is_high_signal(question, {"choice": "low", "confidence": 0.95}, 0.7)
     assert grill._is_high_signal(question, {"choice": "high", "confidence": 0.95}, 0.7)
+
+
+def _levels(n: int) -> dict:
+    return {"type": "score", "criteria": [{"summary": f"level {i}"} for i in range(n)]}
+
+
+@pytest.mark.parametrize(
+    ("levels", "score", "weak"),
+    [
+        (2, 1.0, False),  # the best answer on a 2-level scale is not a finding
+        (2, 0.0, True),
+        (4, 1.0, True),  # the built-in 4-level questions keep their old cut-off
+        (4, 2.0, False),
+        (10, 3.0, True),  # the bottom third of a 10-level scale is a finding
+        (10, 6.0, False),
+    ],
+)
+def test_score_finding_uses_the_question_scale(levels: int, score: float, weak: bool) -> None:
+    grill = _load_module()
+    assert grill._is_high_signal(_levels(levels), {"score": score}, 0.7) is weak
+
+
+def test_score_report_names_the_question_scale() -> None:
+    grill = _load_module()
+    action = grill._suggest_action("x_quality", "score", {"score": 3.0, "legend": {}}, "How good?", levels=10)
+    assert "3.0/9" in action
+
+
+def test_run_battery_stops_when_jev_goes_down_mid_run(monkeypatch) -> None:
+    """An outage after the first probe must stop the run, not split and retry every batch."""
+    grill = _load_module()
+    calls = {"n": 0}
+    down = {"now": False}
+
+    def fake(_state, questions, **_kw):
+        calls["n"] += 1
+        if "probe" in questions:
+            if down["now"]:
+                raise grill.jev_transport.JevTransportError("HTTP 503", source="direct")
+            down["now"] = True  # the outage starts right after the first probe passes
+            return {"answers": {"probe": {"noul": 0.9}}}
+        if down["now"] or "q00" in questions:
+            raise grill.jev_transport.JevTransportError("HTTP 503" if down["now"] else "HTTP 400", source="direct")
+        return {"answers": {k: {"noul": 0.1} for k in questions}}
+
+    monkeypatch.setattr(grill.jev_transport, "evaluate", fake)
+    questions = {f"q{i:02d}": _noul(f"Is item {i} ok?") for i in range(75)}
+    with pytest.raises(grill.jev_transport.JevTransportError):
+        grill._run_battery({"artifact": "x"}, questions, timeout=1)
+    assert calls["n"] <= 15  # was 142 failed calls with no error raised
 
 
 def test_load_questions_uses_a_runner_authored_battery(tmp_path: Path) -> None:
@@ -71,6 +123,56 @@ def test_run_battery_isolates_a_failing_question_and_keeps_the_rest(monkeypatch)
     assert {k: v.get("noul") for k, v in answers.items() if "error" not in v} == {"a": 0.1, "c": 0.1, "d": 0.1}
     assert "Gateway 400" in answers["bad"]["error"]
     assert ["probe"] in calls  # a probe told a bad question apart from an outage
+
+
+def _battery() -> dict:
+    return {
+        "n": _noul("n?"),
+        "c": {
+            "type": "choice",
+            "report_choices": ["bad"],
+            "instructions": {"question": "c?"},
+            "criteria": {"ok": {"what": "fine"}, "bad": {"what": "not fine"}},
+        },
+        "s": {
+            "type": "score",
+            "instructions": {"question": "s?"},
+            "criteria": [{"summary": "low", "signals": []}, {"summary": "high", "signals": []}],
+        },
+    }
+
+
+def test_run_battery_marks_missing_and_malformed_answers_unanswered(monkeypatch, capsys) -> None:
+    grill = _load_module()
+    cases = {
+        "missing": {},
+        "noul_nan": {"n": {"noul": float("nan")}, "c": {"choice": "ok"}, "s": {"score": 0.5}},
+        "noul_string": {"n": {"noul": "0.1"}, "c": {"choice": "ok"}, "s": {"score": 0.5}},
+        "noul_out_of_range": {"n": {"noul": 4}, "c": {"choice": "ok"}, "s": {"score": 0.5}},
+        "choice_not_offered": {"n": {"noul": 0.1}, "c": {"choice": "banana"}, "s": {"score": 0.5}},
+        "score_off_scale": {"n": {"noul": 0.1}, "c": {"choice": "ok"}, "s": {"score": 9}},
+        "answer_not_an_object": {"n": [0.1], "c": "ok", "s": 1},
+    }
+    for name, replied in cases.items():
+        monkeypatch.setattr(
+            grill.jev_transport, "evaluate", lambda _s, _q, replied=replied, **_kw: {"answers": replied}
+        )
+        answers = grill._run_battery({"artifact": "x"}, _battery(), timeout=1)
+        unanswered = {qid for qid, a in answers.items() if "error" in a}
+        assert unanswered, f"{name}: a bad reply was read as an answer"
+        assert grill._print_report(answers, _battery(), "general", 0.7, True) == 2
+    capsys.readouterr()
+    clean = {"n": {"noul": 0.1}, "c": {"choice": "ok"}, "s": {"score": 0.5}}
+    monkeypatch.setattr(grill.jev_transport, "evaluate", lambda _s, _q, **_kw: {"answers": clean})
+    assert grill._run_battery({"artifact": "x"}, _battery(), timeout=1) == clean
+
+
+def test_run_battery_ignores_answers_to_questions_it_did_not_ask(monkeypatch) -> None:
+    grill = _load_module()
+    reply = {"n": {"noul": 0.1}, "c": {"choice": "ok"}, "s": {"score": 0.5}, "extra": {"noul": 0.0}}
+    monkeypatch.setattr(grill.jev_transport, "evaluate", lambda _s, _q, **_kw: {"answers": reply})
+    answers = grill._run_battery({"artifact": "x"}, _battery(), timeout=1)
+    assert set(answers) == {"n", "c", "s"}
 
 
 def test_run_battery_raises_when_jev_is_down(monkeypatch) -> None:
@@ -146,3 +248,21 @@ def test_choice_report_choices_must_name_real_options() -> None:
 def test_score_label_uses_level_summary_not_dict() -> None:
     answer = {"score": 0.1, "legend": {"0": {"summary": "Unrealistic", "signals": ["no buffer"]}}}
     assert _load_module()._format_answer("score", answer) == "score=0.10 (Unrealistic)"
+
+
+def test_load_questions_names_the_expected_shape_for_a_top_level_list(tmp_path: Path) -> None:
+    grill = _load_module()
+    battery = tmp_path / "questions.json"
+    battery.write_text(json.dumps([{"type": "noul"}]), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"top level is a JSON list.*\{\"questions\": \{\"<id>\""):
+        grill._load_questions(str(battery))
+
+
+def test_report_header_labels_the_question_source(capsys: pytest.CaptureFixture[str]) -> None:
+    grill = _load_module()
+    q = {"type": "noul", "report_when": "false", "instructions": {"question": "Ok?"}}
+    grill._print_report({"a": {"type": "noul", "noul": 0.9}}, {"a": q}, "plan", 0.7, True)
+    grill._print_report({"a": {"type": "noul", "noul": 0.9}}, {"a": q}, "plan", 0.7, False)
+    out = capsys.readouterr().out
+    assert "(questions file)" in out and "(static fallback)" in out and "(generated)" not in out

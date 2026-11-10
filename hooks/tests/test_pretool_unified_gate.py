@@ -691,6 +691,59 @@ class TestCheckSensitiveFileRead:
         payload = json.dumps({"tool_name": "Read", "tool_input": {"file_path": ""}})
         assert _run_main(payload) == 0
 
+    def test_read_advisory_reaches_the_model_without_a_decision(self):
+        """B-03: PreToolUse stderr on exit 0 reaches no one; additionalContext reaches the model."""
+        stdout = _run_main_stdout(_make_read_event("/project/.env"))
+        output = json.loads(stdout)
+        assert set(output) == {"hookSpecificOutput"}
+        inner = output["hookSpecificOutput"]
+        assert set(inner) == {"hookEventName", "additionalContext"}
+        assert inner["hookEventName"] == "PreToolUse"
+        assert "[sensitive-file-guard] ADVISORY: Read of sensitive file" in inner["additionalContext"]
+        assert "/project/.env" in inner["additionalContext"]
+        assert "OWNER-APPROVED-SECRET-READ" in inner["additionalContext"]
+
+    def test_read_advisory_is_recorded_as_an_unblocked_governance_event(self):
+        with patch.object(mod, "record_governance") as record:
+            _run_main_stdout(_make_read_event("/project/.env"))
+        record.assert_called_once()
+        args, kwargs = record.call_args
+        assert args == ("security_finding",)
+        assert kwargs["hook_name"] == "pretool-unified-gate"
+        assert kwargs["tool_name"] == "Read"
+        assert kwargs["blocked"] is False
+
+    def test_read_without_a_match_prints_nothing(self):
+        with patch.object(mod, "record_governance") as record:
+            assert _run_main_stdout(_make_read_event("/project/src/app.py")) == ""
+        record.assert_not_called()
+
+    def test_bypassed_read_prints_nothing(self):
+        stdout = _run_main_stdout(_make_read_event("/project/.env"), env={"SENSITIVE_FILE_GUARD_BYPASS": "1"})
+        assert stdout == ""
+
+
+def _run_main_stdout(stdin_payload: str, env: dict | None = None) -> str:
+    """Invoke mod.main() in-process like _run_main and return its raw stdout."""
+    base_env = dict(os.environ)
+    for var in ("CLAUDE_GATE_BYPASS", "DANGEROUS_GUARD_BYPASS", "CREATION_GATE_BYPASS", "SENSITIVE_FILE_GUARD_BYPASS"):
+        base_env.pop(var, None)
+    base_env["CLAUDE_OPERATOR_PROFILE"] = "work"
+    if env:
+        base_env.update(env)
+    stdout_capture = io.StringIO()
+    with (
+        patch.dict(os.environ, base_env, clear=True),
+        patch.object(mod, "read_stdin", return_value=stdin_payload),
+        patch("sys.stdout", stdout_capture),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        try:
+            mod.main()
+        except SystemExit:
+            pass
+    return stdout_capture.getvalue().strip()
+
 
 # ---------------------------------------------------------------------------
 # TestMainDispatch
@@ -2484,3 +2537,112 @@ class TestSysadminFreeTextFalsePositives:
     def test_redis_real_quoted_bind_with_other_quoted_arg_blocked(self):
         """A real quoted public bind alongside an unrelated quoted arg → BLOCK."""
         assert _sysadmin_blocks('redis-server --logfile "/var/log/r.log" --bind "0.0.0.0"') is True
+
+
+# ---------------------------------------------------------------------------
+# Startup cost: patterns compile on first use, subprocess/hashlib import on first use
+# ---------------------------------------------------------------------------
+
+
+def _lazy_patterns(value, seen: set[int]):
+    """Yield every _rx reachable from a module global through tuples, lists, sets and dicts."""
+    if id(value) in seen:
+        return
+    seen.add(id(value))
+    if isinstance(value, mod._rx):
+        yield value
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from _lazy_patterns(k, seen)
+            yield from _lazy_patterns(v, seen)
+    elif isinstance(value, (tuple, list, set, frozenset)):
+        for item in value:
+            yield from _lazy_patterns(item, seen)
+
+
+class TestLazyStartup:
+    def test_every_lazy_pattern_compiles_to_the_same_pattern(self):
+        """A lazy pattern that fails to compile would only show when its check runs; compile them all here."""
+        seen: set[int] = set()
+        found = [p for value in vars(mod).values() for p in _lazy_patterns(value, seen)]
+        assert len(found) >= 90, f"only {len(found)} lazy patterns found; the walk no longer reaches them"
+        for lazy in found:
+            pattern, flags = lazy._args
+            expected = re.compile(pattern, flags)
+            assert lazy.compiled is expected or (lazy.pattern, lazy.flags) == (expected.pattern, expected.flags)
+            assert bool(lazy.search("")) == bool(expected.search(""))
+
+    def test_lazy_pattern_forwards_pattern_methods(self):
+        lazy = mod._rx(r"(?P<word>[a-z]+)\s+B", re.IGNORECASE)
+        assert lazy._compiled is None
+        assert lazy.search("xx hello b").group("word") == "hello"
+        assert isinstance(lazy.compiled, re.Pattern)
+        assert lazy.sub("-", "hello b") == "-"
+        assert [m.group(0) for m in lazy.finditer("a b c B")] == ["a b", "c B"]
+        assert lazy.flags & re.IGNORECASE
+
+    def test_no_module_level_re_compile(self):
+        """A module-level re.compile is paid on every tool call; module-level patterns use _rx."""
+        import ast
+
+        tree = ast.parse(HOOK_PATH.read_text(encoding="utf-8"))
+        eager: list[int] = []
+
+        def walk(node: ast.AST) -> None:
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                    continue
+                if (
+                    isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Attribute)
+                    and child.func.attr == "compile"
+                    and isinstance(child.func.value, ast.Name)
+                    and child.func.value.id == "re"
+                ):
+                    eager.append(child.lineno)
+                walk(child)
+
+        walk(tree)
+        assert eager == [], f"module-level re.compile at lines {eager}; use _rx"
+
+    def test_allow_path_imports_neither_subprocess_nor_hashlib(self, tmp_path):
+        """A plain allowed Bash call must not pay for the modules only a few checks use."""
+        import subprocess
+        import sys
+
+        probe = (
+            "import io, json, runpy, sys\n"
+            "sys.stdin = io.StringIO(json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 'ls -la'}}))\n"
+            # Some interpreters load these through runpy or site (Python 3.10 on CI
+            # does), so count only what the hook itself adds.
+            "before = {m for m in ('subprocess', 'hashlib') if m in sys.modules}\n"
+            "try:\n"
+            f"    runpy.run_path({str(HOOK_PATH)!r}, run_name='__main__')\n"
+            "except SystemExit as e:\n"
+            "    code = e.code or 0\n"
+            "else:\n"
+            "    code = 0\n"
+            "print(json.dumps({'code': code,"
+            " 'subprocess': 'subprocess' in sys.modules and 'subprocess' not in before,"
+            " 'hashlib': 'hashlib' in sys.modules and 'hashlib' not in before}), file=sys.stderr)\n"
+        )
+        env = {**os.environ, "HOME": str(tmp_path), "CLAUDE_LEARNING_DIR": str(tmp_path / "learning")}
+        result = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True, timeout=30, env=env, check=False
+        )
+        report = json.loads(result.stderr.strip().splitlines()[-1])
+        assert report == {"code": 0, "subprocess": False, "hashlib": False}
+
+    def test_lazy_modules_stay_reachable_as_attributes(self):
+        """Tests and callers patch mod.subprocess.run; the attribute must be the real module."""
+        import hashlib
+        import subprocess
+
+        assert mod.subprocess is subprocess
+        assert mod.hashlib is hashlib
+        try:
+            mod.no_such_attribute_xyz  # noqa: B018
+        except AttributeError as e:
+            assert "no_such_attribute_xyz" in str(e)
+        else:
+            raise AssertionError("an unknown attribute must raise AttributeError")

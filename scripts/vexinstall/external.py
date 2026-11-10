@@ -11,6 +11,9 @@ Builders come from the generator scripts as imported functions; the engine does
 every write itself (guarded, atomic, mode 600), only when bytes change, and
 backs up the old file to ``~/.claude/vexjoy/backups/<target>-<file>.<ts>``.
 Profile-disabled hooks are dropped. Keys other than ``hooks`` are kept.
+
+``uninstall`` uses ``removal`` to take the owned hook entries back out of those files
+(not codex ``config.toml``), with the same write and backup rule.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 
+from . import settings as settings_mod
 from .common import SETTINGS_BACKUPS_KEEP, utc_ts
 from .fsops import Guard, atomic_write_bytes, mkdirs
 from .profile import Profile, filter_settings_hooks
@@ -129,7 +133,7 @@ def _factory(root: Path, source_root: Path, profile: Profile) -> list[ExternalFi
     if not repo:
         f.error = "repo .claude/settings.json missing or invalid"
         return [f]
-    text = json.dumps(repo.get("hooks", {}))
+    text = json.dumps(settings_mod.drop_repo_only(repo.get("hooks", {})))
     for form in ("$HOME", "${HOME}", "~"):
         text = text.replace(f"{form}/.claude/", f"{form}/.factory/")
     merged = _read_json(f.path)
@@ -156,13 +160,118 @@ def _reasonix(root: Path, source_root: Path, profile: Profile) -> list[ExternalF
     return [f]
 
 
-_BUILDERS = {"codex": _codex, "factory": _factory, "reasonix": _reasonix}
+def _antigravity(root: Path, source_root: Path, profile: Profile) -> list[ExternalFile]:
+    f = ExternalFile("antigravity", root / "config" / "hooks.json")
+    allow = source_root / "scripts" / "agy-hooks-allowlist.txt"
+    mod = _load("generate-agy-hooks-json.py")
+    if not allow.is_file():
+        f.error = "no agy-hooks-allowlist.txt"
+    elif mod is None:
+        f.error = "generate-agy-hooks-json.py not importable"
+    else:
+        try:
+            data = mod.build_hooks_json(
+                _allowlist_entries(mod, allow, profile),
+                agy_hooks_dir=str(root / "hooks"),
+                source_hooks_dir=source_root / "hooks",
+            )
+            f.content = _dump(mod.merge_hooks_json(_read_json(f.path), data))
+        except (ValueError, OSError) as exc:
+            f.error = str(exc)
+    return [f]
+
+
+_BUILDERS = {"codex": _codex, "factory": _factory, "reasonix": _reasonix, "antigravity": _antigravity}
 
 
 def desired(target: str, root: Path, source_root: Path, profile: Profile) -> list[ExternalFile]:
     """Generated files for *target* (empty for claude and hermes)."""
     builder = _BUILDERS.get(target)
     return builder(root, source_root, profile) if builder else []
+
+
+# Files uninstall cleans: (target, path under the runtime root, owned events live in "hooks"
+# (True) or in each top-level group object (False, Antigravity's hooks.json)). Codex
+# config.toml is left alone: it holds the hooks feature flag, not hook entries, and turning
+# the flag off would also stop the user's own hooks.
+_REMOVALS = {
+    "codex": ("hooks.json", True),
+    "factory": ("settings.json", True),
+    "reasonix": ("settings.json", True),
+    "antigravity": ("config/hooks.json", False),
+}
+
+
+def _strip_events(events: dict, rule: settings_mod.OwnerRule) -> int:
+    """Drop owned handlers from an event map in place; return how many went.
+
+    An event list holds handlers (``{"command": ...}``) or matcher blocks
+    (``{"matcher": ..., "hooks": [handler, ...]}``). A block or event emptied here is
+    dropped; one that was already empty stays.
+    """
+    removed = 0
+    for event in list(events):
+        items = events[event]
+        if not isinstance(items, list):
+            continue
+        kept: list = []
+        for item in items:
+            if isinstance(item, dict) and isinstance(item.get("hooks"), list):
+                handlers = [h for h in item["hooks"] if not rule.owns(h)]
+                gone = len(item["hooks"]) - len(handlers)
+                removed += gone
+                if handlers or not gone:
+                    kept.append({**item, "hooks": handlers})
+            elif rule.owns(item):
+                removed += 1
+            else:
+                kept.append(item)
+        if kept or not items:
+            events[event] = kept
+        else:
+            del events[event]
+    return removed
+
+
+def removal(target: str, root: Path, home: Path, source_root: Path) -> list[ExternalFile]:
+    """Runtime configs of *target* without the hook entries that run engine-owned scripts.
+
+    An entry is owned under the same rule as ~/.claude/settings.json (its first path is
+    inside ``<root>/hooks``, the repo's ``hooks/``, or a legacy toolkit path). Other keys and
+    entries stay. ``content`` is None when nothing owned is there, so the file is not touched.
+    """
+    spec = _REMOVALS.get(target)
+    if spec is None:
+        return []
+    rel, under_hooks = spec
+    f = ExternalFile(target, root / rel)
+    if not f.path.is_file():
+        return []
+    try:
+        data = json.loads(f.path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        f.error = f"unreadable, owned hook entries left in place: {exc}"
+        return [f]
+    if not isinstance(data, dict):
+        f.error = "not a JSON object, owned hook entries left in place"
+        return [f]
+    rule = settings_mod.OwnerRule(home=home, hooks_dir=root / "hooks", source_root=source_root)
+    removed = 0
+    if under_hooks:
+        if isinstance(data.get("hooks"), dict):
+            removed = _strip_events(data["hooks"], rule)
+    else:
+        for name in list(data):
+            group = data[name]
+            if not isinstance(group, dict):
+                continue
+            gone = _strip_events(group, rule)
+            removed += gone
+            if gone and not any(isinstance(v, list) for v in group.values()):
+                del data[name]
+    if removed:
+        f.content = _dump(data)
+    return [f]
 
 
 def _backup(f: ExternalFile, backups: Path, guard: Guard) -> None:

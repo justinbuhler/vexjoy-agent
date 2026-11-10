@@ -8,8 +8,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-AGENTS_DIR = Path(__file__).parent.parent / "agents"
-REPO_ROOT = Path(__file__).parent.parent
+AGENTS_DIR = Path(__file__).resolve().parent.parent / "agents"
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
 # Do-framing validation
@@ -420,7 +420,6 @@ _KNOWN_OVERSIZED_SKILL_REFS: dict[str, str] = {
     "frontend/frontend/references/threejs-builder-refs/react-three-fiber.md": "2026-09-18",
     "frontend/frontend/references/threejs-builder-refs/visual-polish.md": "2026-09-18",
     "frontend/frontend/references/threejs-builder-refs/webgpu.md": "2026-09-18",
-    "frontend/webgl-card-effects/references/shader-integration-react.md": "2026-09-18",
     "meta/toolkit/references/skill-composer/examples.md": "2026-09-18",
     "meta/toolkit/references/skill-creator/agent-template.md": "2026-09-18",
     "meta/toolkit/references/skill-creator.md": "2026-09-18",
@@ -560,6 +559,54 @@ _COMMAND_LEGACY_HANDOFF = re.compile(
 )
 
 
+# Dispatch text: the files whose agent and skill names reach a dispatch call verbatim.
+_DISPATCH_NAME_GLOBS = ("skills/**/SKILL.md", "skills/meta/do/references/*.md")
+# Harness-provided agent types, plus `main` (the main-thread route in the [do-route] marker).
+_BUILTIN_AGENTS = frozenset({"general-purpose", "main", "Explore", "Plan"})
+_NAME = r"[A-Za-z0-9][A-Za-z0-9-]*"
+_DISPATCH_AGENT = re.compile(
+    rf"""(?:\b(?:agentType|subagent_type)|["']agent["'])\s*[:=]\s*["'`]({_NAME})["'`]|\bagent=({_NAME})"""
+)
+_DISPATCH_SKILL = re.compile(rf"""["']skill["']\s*:\s*["'`]({_NAME})["'`]|\bskill=({_NAME})""")
+_DISPATCH_SKILL_LIST = re.compile(r"\bskills\s*:\s*\[([^\]]*)\]")
+_QUOTED_NAME = re.compile(rf"""["']({_NAME})["']""")
+
+
+def _agent_names(root: Path) -> set[str]:
+    """Agent names from agents/INDEX.json when built, plus every agents/*.md file."""
+    names = {p.stem for p in (root / "agents").glob("*.md") if p.name not in _SKIP_FILENAMES}
+    index = root / "agents" / "INDEX.json"
+    if index.is_file():
+        names |= set(json.loads(index.read_text(encoding="utf-8")).get("agents", {}))
+    return names
+
+
+def check_dispatch_names(root: Path, skill_names: set[str]) -> list[str]:
+    """Return failures for agent and skill names in dispatch text that resolve to nothing.
+
+    Checks only keyed slots, where the name is passed to a dispatch as written:
+    `agentType: "x"`, `subagent_type: "x"`, `"agent": "x"`, `agent=x`, `"skill": "x"`,
+    `skill=x`, and `skills: ["x", "y"]`. Placeholders (`<agent>`, `{a}`) never match.
+    """
+    agents = _agent_names(root) | _BUILTIN_AGENTS
+    files = sorted({p for pattern in _DISPATCH_NAME_GLOBS for p in root.glob(pattern) if p.is_file()})
+    failures: list[str] = []
+    for path in files:
+        rel = path.relative_to(root)
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for match in _DISPATCH_AGENT.finditer(line):
+                name = match.group(1) or match.group(2)
+                if name not in agents:
+                    failures.append(f"{rel}:{lineno}: dispatches agent {name!r}, which is no indexed agent")
+            named = [m.group(1) or m.group(2) for m in _DISPATCH_SKILL.finditer(line)]
+            for match in _DISPATCH_SKILL_LIST.finditer(line):
+                named.extend(_QUOTED_NAME.findall(match.group(1)))
+            for name in named:
+                if name not in skill_names:
+                    failures.append(f"{rel}:{lineno}: dispatches skill {name!r}, which is no indexed skill or command")
+    return failures
+
+
 def _skill_call_runtime_files(root: Path) -> list[Path]:
     files: list[Path] = []
     for name in _SKILL_CALL_RUNTIME_ROOTS:
@@ -580,6 +627,11 @@ def check_skill_calls(root: Path = REPO_ROOT) -> list[str]:
     - Commands hand off with that exact call, not "read and follow the skill at" wording.
     - A pipeline that is not also a skill is reached through the workflow skill,
       never by a direct "invoke/route to/hand off to <pipeline>" instruction.
+    - Every "Call the Skill tool with `x`" outside tests names an indexed skill or a
+      command; a retired or misspelled name fails at runtime, and the failed call
+      leaves no usage record.
+    - Every agent and skill name in a keyed dispatch slot of a SKILL.md or a /do
+      reference resolves (see ``check_dispatch_names``).
     """
     repo = str(REPO_ROOT.resolve())
     if repo not in sys.path:
@@ -605,6 +657,8 @@ def check_skill_calls(root: Path = REPO_ROOT) -> list[str]:
         return failures
     skills = set(json.loads(skills_index.read_text(encoding="utf-8"))["skills"])
     pipelines = set(json.loads(pipeline_index.read_text(encoding="utf-8"))["pipelines"])
+    # Commands are Skill-tool targets too: the harness lists each one as a skill.
+    callable_names = skills | {p.stem for p in (root / "commands").glob("*.md")}
     patterns = [
         (
             name,
@@ -620,12 +674,33 @@ def check_skill_calls(root: Path = REPO_ROOT) -> list[str]:
             for name, rx in patterns:
                 if rx.search(line):
                     failures.append(f"{path.relative_to(root)}:{lineno}: direct handoff to pipeline {name!r}")
+            for match in CONCRETE_SKILL_CALL.finditer(line):
+                if match.group(1) not in callable_names:
+                    failures.append(
+                        f"{path.relative_to(root)}:{lineno}: calls the Skill tool with {match.group(1)!r}, "
+                        "which is no indexed skill or command"
+                    )
+    failures.extend(check_dispatch_names(root, callable_names))
     return failures
 
 
 def run_check_skill_calls(json_output: bool) -> int:
-    """Run --check-skill-calls and return the exit code."""
-    failures = check_skill_calls()
+    """Run --check-skill-calls and return the exit code.
+
+    Regenerates a missing or stale skills or agents index first, so a renamed
+    or removed component does not resolve through an old index.
+    """
+    lib = str(REPO_ROOT / "scripts" / "lib")
+    if lib not in sys.path:
+        sys.path.append(lib)
+    from index_freshness import ensure_fresh_indexes
+
+    try:
+        ensure_fresh_indexes(REPO_ROOT)
+    except RuntimeError as exc:
+        failures = [f"index not current: {exc}"]
+    else:
+        failures = check_skill_calls()
     if json_output:
         print(json.dumps({"failures": failures, "exit_code": 1 if failures else 0}, indent=2))
     else:
@@ -773,7 +848,7 @@ def main() -> None:
     parser.add_argument(
         "--check-skill-calls",
         action="store_true",
-        help="Check Skill-tool call wording in commands and pipeline handoffs",
+        help="Check Skill-tool call wording, pipeline handoffs, and that each called or dispatched name exists",
     )
     parser.add_argument(
         "--allowlist",

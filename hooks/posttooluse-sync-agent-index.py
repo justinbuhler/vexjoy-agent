@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hook-version: 2.0.0
+# hook-version: 2.0.2
 """
 PostToolUse Hook: refresh the installed agent index on agent-file edits.
 
@@ -15,7 +15,27 @@ skill-index hook and before posttool-docs-drift-alert.py):
     python3 "$HOME/.claude/hooks/posttooluse-sync-agent-index.py"   timeout 15000
 """
 
+import sys  # vexjoy-pyguard
+
+if sys.version_info < (3, 10):  # vexjoy-pyguard advisory
+    import os
+
+    if not os.environ.get("VEXJOY_PYGUARD_REEXEC"):
+        os.environ["VEXJOY_PYGUARD_REEXEC"] = "1"
+        for _d in [*os.environ.get("PATH", "").split(os.pathsep), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
+            for _v in ("14", "13", "12", "11", "10"):
+                _p = os.path.join(_d, "python3." + _v)
+                if _d and "/shims" not in _d and os.access(_p, os.X_OK):
+                    os.execv(_p, [_p, *sys.argv])
+    sys.stderr.write(
+        "[vexjoy] hook %s needs Python 3.10+, got %s (%s); run ./install.sh in vexjoy-agent from a terminal"
+        " outside Claude Code (gated tool calls stay blocked until then)\n"
+        % (__file__.rsplit("/", 1)[-1], sys.version.split()[0], sys.executable)
+    )
+    sys.exit(0)
+
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -46,8 +66,16 @@ def is_agent_file(file_path: str) -> bool:
     return Path(file_path).name not in _EXCLUDE
 
 
+_BYPASS_ENV = "POSTTOOLUSE_SYNC_AGENT_INDEX_BYPASS"
+
+
 def main() -> None:
     """Process PostToolUse hook event."""
+    if os.environ.get(_BYPASS_ENV) == "1":
+        if os.environ.get("CLAUDE_HOOKS_DEBUG"):
+            print("[posttooluse-sync-agent-index] Bypassed via POSTTOOLUSE_SYNC_AGENT_INDEX_BYPASS=1", file=sys.stderr)
+        sys.exit(0)
+
     try:
         from stdin_timeout import read_stdin
 

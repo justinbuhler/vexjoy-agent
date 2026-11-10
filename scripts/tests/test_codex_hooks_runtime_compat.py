@@ -332,6 +332,8 @@ def _prepare_case(
         for name in ("skills", "agents", "hooks"):
             (cwd / name).mkdir()
         evidence["ephemeral_checkout"] = cwd
+        # pytest tmp dirs are under /tmp only on Linux; name the checkout itself so macOS skips too.
+        env["VEXINSTALL_EPHEMERAL_PREFIXES"] = str(cwd)
     elif filename == "hook-version-parity-check.py":
         repo_hooks = cwd / "hooks"
         deployed = home / ".claude" / "hooks"

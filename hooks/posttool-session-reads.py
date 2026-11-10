@@ -28,6 +28,7 @@ Design Principles:
 """
 
 import json
+import os
 import re
 import shlex
 import sys
@@ -188,7 +189,8 @@ def main() -> None:
                 seen.add((session_id, file_path))
                 entries.append({"ts": now.isoformat(), "session": session_id, "path": file_path})
 
-        tmp_path = reads_path.with_suffix(".tmp")
+        # Per-process name: parallel hook runs shared one .tmp and lost the replace race.
+        tmp_path = reads_path.with_suffix(f".{os.getpid()}.tmp")
         tmp_path.write_text("".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8")
         tmp_path.replace(reads_path)
 

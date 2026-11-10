@@ -26,65 +26,55 @@ one generic question per heading:
 
 ## Battery Format
 
-The file must be a JSON array. Every question needs a unique `id`, a concise
-`question`, and an `inspect` target. Add structured criteria when they make a
-finding testable.
+`scripts/grill-jev.py` reads a JSON object keyed by question ID (or `{"questions": {...}}`).
+A list is rejected. Each value needs `type` (`noul`, `choice` or `score`) and an
+`instructions` object with `question` and `inspect` (optional `focus`, `compare`).
+A Noul needs `report_when` ("true" or "false"): the answer that is a finding.
 
 ```json
-[
-  {
-    "id": "success_criteria",
-    "question": "Does the rollout define observable success criteria for each changed service?",
-    "inspect": "artifact",
-    "focus": "Named metrics, thresholds, and the owner who decides whether to proceed.",
+{
+  "success_criteria": {
+    "type": "noul",
+    "report_when": "false",
+    "instructions": {
+      "question": "Does the rollout define observable success criteria for each changed service?",
+      "inspect": "artifact",
+      "focus": "Named metrics, thresholds, and the owner who decides whether to proceed."
+    },
     "criteria": {
-      "true": {
-        "what": "Every service has a measurable success signal and decision owner.",
-        "examples": ["p95 latency stays below 200 ms", "on-call approves the next phase"]
-      },
-      "false": {
-        "what": "Success is subjective, implied, or lacks an accountable owner.",
-        "examples": ["monitor it", "should work normally"]
-      }
+      "true": {"what": "Every service has a measurable success signal and decision owner.",
+               "examples": ["p95 latency stays below 200 ms"]},
+      "false": {"what": "Success is subjective, implied, or lacks an owner.",
+                "examples": ["monitor it"]}
     }
   },
-  {
-    "id": "rollback_safety",
-    "question": "Can the data migration be rolled back safely after live writes begin?",
-    "inspect": "artifact",
-    "focus": "Ordering, compatibility window, backups, and irreversible transforms.",
-    "criteria": {
-      "summary": "Rollback readiness",
-      "levels": [
-        {"summary": "Unsafe", "signals": ["no rollback", "irreversible transform"]},
-        {"summary": "Partial", "signals": ["rollback exists but live writes are not addressed"]},
-        {"summary": "Ready", "signals": ["tested rollback and explicit compatibility window"]}
-      ]
-    }
+  "rollback_safety": {
+    "type": "score",
+    "instructions": {"question": "Can the data migration be rolled back safely after live writes begin?",
+                     "inspect": "artifact"},
+    "criteria": [
+      {"summary": "Unsafe", "signals": ["no rollback", "irreversible transform"]},
+      {"summary": "Partial", "signals": ["rollback exists but live writes are not addressed"]},
+      {"summary": "Ready", "signals": ["tested rollback and explicit compatibility window"]}
+    ]
   },
-  {
-    "id": "implementation_choice",
-    "question": "Which deployment approach best matches the stated availability constraint?",
-    "inspect": "artifact",
+  "implementation_choice": {
+    "type": "choice",
+    "report_choices": ["atomic"],
+    "instructions": {"question": "Which deployment approach best matches the stated availability constraint?",
+                     "inspect": "artifact"},
     "criteria": {
-      "choices": [
-        {
-          "value": "phased",
-          "what": "Progressive rollout with measured gates.",
-          "not_for": "Changes that cannot safely run in mixed-version mode.",
-          "examples": ["canary", "region-by-region"]
-        },
-        {
-          "value": "atomic",
-          "what": "One coordinated switch with a prepared rollback.",
-          "not_for": "Systems that require long migration windows.",
-          "examples": ["feature-flag cutover"]
-        }
-      ]
+      "phased": {"what": "Progressive rollout with measured gates.",
+                 "not_for": "Changes that cannot run in mixed-version mode.", "examples": ["canary"]},
+      "atomic": {"what": "One coordinated switch with a prepared rollback.",
+                 "not_for": "Systems that need long migration windows.", "examples": ["feature-flag cutover"]}
     }
   }
-]
+}
 ```
+
+Score criteria are a list of levels, lowest first. Choice criteria map each option
+to `{what, not_for, examples}`.
 
 ## Prompting Pattern
 

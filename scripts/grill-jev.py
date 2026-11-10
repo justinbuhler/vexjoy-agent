@@ -138,6 +138,10 @@ def _battery_problems(questions: dict[str, Any]) -> list[str]:
                 problems.append(f"{qid}: score criteria must be a list of {{summary, signals}} levels, lowest first")
         elif qtype == "choice" and not (isinstance(criteria, dict) and criteria):
             problems.append(f"{qid}: choice criteria must map each option to {{what, not_for, examples}}")
+        elif qtype == "choice" and not (
+            isinstance(q.get("report_choices"), list) and q["report_choices"] and set(q["report_choices"]) <= set(criteria)
+        ):
+            problems.append(f"{qid}: choice needs report_choices, a non-empty subset of its criteria options")
     return problems
 
 
@@ -182,7 +186,7 @@ FALLBACK_QUESTIONS: dict[str, Any] = {
     },
     "r_blast_radius": {
         "type": "choice",
-        "report_choices": ["broad", "systemic"],
+        "report_choices": ["broad", "critical"],
         "instructions": {
             "question": "What is the blast radius if this change fails?",
             "focus": "How many users, services, or systems are affected by complete failure?",
@@ -368,6 +372,14 @@ def _is_high_signal(question: dict[str, Any], answer: dict[str, Any], threshold:
     return False
 
 
+def _level_label(answer: dict[str, Any], score_val: float) -> str:
+    """Jev returns legend levels as {summary, signals}; show the summary."""
+    legend = answer.get("legend", {})
+    level = round(score_val)
+    label = legend.get(str(level), legend.get(level, ""))
+    return label.get("summary", "") if isinstance(label, dict) else str(label)
+
+
 def _format_answer(qtype: str, answer: dict[str, Any]) -> str:
     if qtype == "noul":
         noul_val = answer.get("noul", 0.5)
@@ -379,10 +391,7 @@ def _format_answer(qtype: str, answer: dict[str, Any]) -> str:
         return f"choice={choice} conf={conf:.2f}"
     if qtype == "score":
         score_val = answer.get("score", 0.0)
-        legend = answer.get("legend", {})
-        level = round(score_val)
-        label = legend.get(str(level), legend.get(level, ""))
-        return f"score={score_val:.2f} ({label})"
+        return f"score={score_val:.2f} ({_level_label(answer, score_val)})"
     return str(answer)
 
 
@@ -390,20 +399,19 @@ def _suggest_action(qid: str, qtype: str, answer: dict[str, Any], question_text:
     """Return a one-line action suggestion for a high-signal finding."""
     if qtype == "noul":
         noul_val = answer.get("noul", 0.5)
-        verb = "address" if noul_val >= 0.7 else "review"
+        verb = "address" if abs(noul_val - 0.5) >= 0.2 else "review"
         return f"{verb}: {question_text.lower().rstrip('?')}"
     if qtype == "choice":
         choice = answer.get("choice", "?")
         category = _question_category(qid)
         if category == "risk" and choice in ("high", "critical", "broad"):
             return f"risk level is {choice} — review blast radius and add mitigation"
-        if "reversib" in qid and choice in ("irreversible", "partially_reversible"):
+        if category == "reversibility" and choice in ("irreversible", "partially_reversible"):
             return f"change is {choice} — define rollback strategy or accept the risk explicitly"
         return f"choice '{choice}' — review whether this aligns with requirements"
     if qtype == "score":
         score_val = answer.get("score", 0.0)
-        legend = answer.get("legend", {})
-        label = legend.get(str(round(score_val)), "")
+        label = _level_label(answer, score_val)
         if "timeline" in qid:
             return f"timeline is '{label}' — add buffer or parallelize steps"
         if "detection" in qid or "failure" in qid:
@@ -521,8 +529,7 @@ def _print_report(
             if completeness_answer:
                 score_val = completeness_answer.get("score", -1.0)
                 if score_val >= 0:
-                    legend = completeness_answer.get("legend", {})
-                    label = legend.get(str(round(score_val)), "")
+                    label = _level_label(completeness_answer, score_val)
                     note = "address findings before executing" if score_val < 2.0 else "ready to proceed"
                     print(f"\nOVERALL READINESS: {score_val:.1f}/3 — {label}; {note}")
                 break

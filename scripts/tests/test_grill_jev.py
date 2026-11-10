@@ -127,3 +127,18 @@ def test_run_battery_sends_nothing_when_artifact_too_large(monkeypatch) -> None:
     with pytest.raises(grill.RequestTooLarge):
         grill._run_battery(state, {"risk_1": {"type": "noul", "instructions": "ok?"}}, timeout=1)
     assert sent == []
+
+
+def test_fallback_battery_is_valid() -> None:
+    assert _load_module()._battery_problems(_load_module().FALLBACK_QUESTIONS) == []
+
+
+def test_choice_report_choices_must_name_real_options() -> None:
+    q = {"type": "choice", "report_choices": ["systemic"], "instructions": {"question": "?"},
+         "criteria": {"low": {"what": "a"}, "critical": {"what": "b"}}}
+    assert _load_module()._battery_problems({"x": q})
+
+
+def test_score_label_uses_level_summary_not_dict() -> None:
+    answer = {"score": 0.1, "legend": {"0": {"summary": "Unrealistic", "signals": ["no buffer"]}}}
+    assert _load_module()._format_answer("score", answer) == "score=0.10 (Unrealistic)"

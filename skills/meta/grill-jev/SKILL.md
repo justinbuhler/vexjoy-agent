@@ -153,6 +153,10 @@ Focus questions on the actual content of the artifact. A plan with no
 database steps needs no database migration questions. A plan with a
 single deploy step needs no multi-service blast radius question.
 
+Every Noul needs "report_when" ("true" or "false"): the answer that is a
+finding. Every Choice needs "report_choices": the concerning options only.
+Prefix ids by category (c_, f_, r_, s_, v_, k_, rev_, sec_, cost_).
+
 Output a JSON dict of question_id -> question definition.
 ```
 
@@ -197,6 +201,7 @@ OVERALL READINESS: 1.4/3 — partially complete; address findings before executi
 # Noul with structured criteria
 "has_success_criteria": {
     "type": "noul",
+    "report_when": "false",  # the answer that is a finding
     "instructions": {"question": "Does the plan define measurable success criteria?",
                      "inspect": "artifact"},
     "criteria": {
@@ -210,6 +215,7 @@ OVERALL READINESS: 1.4/3 — partially complete; address findings before executi
 # Choice with what/not_for/examples
 "overall_risk": {
     "type": "choice",
+    "report_choices": ["high"],  # subset of the criteria options
     "instructions": {"question": "What is the overall risk level?",
                      "focus": "Weigh irreversibility, dependency count, blast radius."},
     "criteria": {
@@ -243,6 +249,7 @@ OVERALL READINESS: 1.4/3 — partially complete; address findings before executi
 # Noul with array compare instructions
 "assumption_vs_reality": {
     "type": "noul",
+    "report_when": "true",
     "instructions": {
         "question": "Do the plan's assumptions conflict with the known system context?",
         "compare": ["artifact", "context"],

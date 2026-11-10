@@ -284,6 +284,19 @@ def get_project_dir() -> Path:
     return Path(os.environ.get("CLAUDE_PROJECT_DIR", ".")).resolve()
 
 
+def session_reads_path() -> Path:
+    """Session-reads log: <project>/.claude/session-reads.txt by default.
+
+    With $CLAUDE_SESSION_READS_DIR set, one file per project in that folder,
+    so the log stays out of the project tree.
+    """
+    project = get_project_dir()
+    out_dir = os.environ.get("CLAUDE_SESSION_READS_DIR")
+    if out_dir:
+        return Path(out_dir).expanduser() / (str(project).replace("/", "-").strip("-") + ".txt")
+    return project / ".claude" / "session-reads.txt"
+
+
 def get_session_id() -> str:
     """Get session ID from environment or generate a unique fallback.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hook-version: 2.1.0
+# hook-version: 2.2.0
 """
 PostToolUse Hook: Session Read Tracker
 
@@ -20,6 +20,9 @@ to an existing file under cwd, capped at MAX_BASH_PATHS. Codex cannot
 intercept the built-in Read tool, so this keeps the warm-start file list
 populated there. Commands containing rm, mv, cp, or a redirect are ignored.
 
+v2.2 (project root): the file is at $CLAUDE_PROJECT_DIR/.claude/, not under the
+session's cwd, so a session that works inside a data folder does not write there.
+
 Design Principles:
 - SILENT output (no context injection)
 - Non-blocking (always exits 0)
@@ -38,7 +41,7 @@ from pathlib import Path
 # Add lib directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-from hook_utils import empty_output, get_session_id, hook_error, is_sensitive_path
+from hook_utils import empty_output, get_session_id, hook_error, is_sensitive_path, session_reads_path
 from stdin_timeout import read_stdin
 
 EVENT_NAME = "PostToolUse"
@@ -165,7 +168,7 @@ def main() -> None:
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=RETENTION_DAYS)
 
-        reads_path = Path(SESSION_READS_FILE)
+        reads_path = session_reads_path()
         reads_path.parent.mkdir(parents=True, exist_ok=True)
 
         entries: list[dict] = []

@@ -7,6 +7,8 @@ Run with: python3 -m pytest hooks/tests/test_posttool_session_reads.py -v
 
 import importlib.util
 import json
+
+import pytest
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -29,6 +31,13 @@ SESSION_READS_FILE = mod.SESSION_READS_FILE
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+
+@pytest.fixture(autouse=True)
+def _no_project_dir(monkeypatch):
+    """Tests use cwd as the project root; never the real $CLAUDE_PROJECT_DIR."""
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_SESSION_READS_DIR", raising=False)
 
 def run_hook(event: dict) -> tuple[str, str, int]:
     """Run the hook with given event and return (stdout, stderr, exit_code)."""
@@ -357,3 +366,32 @@ class TestNonBlocking:
         stdout, stderr, code = run_hook(read_event("/some/file.py"))
         assert code == 0
         assert (tmp_path / ".claude" / "session-reads.txt").exists()
+
+
+def test_file_goes_to_project_root_not_cwd(tmp_path, monkeypatch):
+    """A session working in a subfolder writes the log at $CLAUDE_PROJECT_DIR/.claude/ (v2.2)."""
+    sub = tmp_path / "data" / "supplied"
+    sub.mkdir(parents=True)
+    (sub / "doc.txt").write_text("x")
+    monkeypatch.chdir(sub)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    _, _, code = run_hook({"tool_name": "Read", "tool_input": {"file_path": str(sub / "doc.txt")}, "session_id": "s1"})
+    assert code == 0
+    assert (tmp_path / ".claude" / "session-reads.txt").is_file()
+    assert not (sub / ".claude").exists()
+
+
+def test_reads_dir_override_keeps_log_out_of_project(tmp_path, monkeypatch):
+    """$CLAUDE_SESSION_READS_DIR moves the log to one file per project outside the tree."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    out = tmp_path / "state"
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+    monkeypatch.setenv("CLAUDE_SESSION_READS_DIR", str(out))
+    _, _, code = run_hook(read_event("/a.py"))
+    assert code == 0
+    assert not (project / ".claude").exists()
+    files = list(out.iterdir())
+    assert len(files) == 1 and files[0].suffix == ".txt"
+    assert json.loads(files[0].read_text().splitlines()[0])["path"] == "/a.py"

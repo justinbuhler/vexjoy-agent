@@ -19,7 +19,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from hook_utils import is_sensitive_path
+from hook_utils import is_sensitive_path, session_reads_path
 
 SESSION_READS_FILE = ".claude/session-reads.txt"
 TASK_PLAN_FILE = "task_plan.md"
@@ -276,7 +276,7 @@ def gather_context_block(session_id: str, agent_type: str = "subagent") -> str:
     """Read every parent-session source from cwd and build the block."""
     task_plan_path = Path(TASK_PLAN_FILE)
     return build_context_block(
-        files=load_recent_reads(Path(SESSION_READS_FILE), session_id),
+        files=load_recent_reads(session_reads_path(), session_id),  # same file as the writer
         task_plan=extract_task_plan(task_plan_path),
         decisions=extract_decisions(task_plan_path),
         adr_session=load_adr_session(Path(ADR_SESSION_FILE)),

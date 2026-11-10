@@ -175,6 +175,7 @@ def _sandbox(tmp_path: Path, session_id: str) -> tuple[Path, dict[str, str], Pat
     for key in ("CLAUDE_HOOKS_DEBUG", "CLAUDE_HOOK_DEBUG", "GH_TOKEN", "GITHUB_TOKEN"):
         env.pop(key, None)
     env["CLAUDE_SESSION_ID"] = session_id
+    env.pop("CLAUDE_SESSION_READS_DIR", None)  # the contract below checks the in-project default
     return cwd, env, transcript
 
 

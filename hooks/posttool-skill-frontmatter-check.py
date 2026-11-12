@@ -48,6 +48,15 @@ SKILL_FILE_RE = re.compile(r"skills/(?:[^/]+/)+SKILL\.md$")
 _BYPASS_ENV = "POSTTOOL_SKILL_FRONTMATTER_CHECK_BYPASS"
 
 
+def _is_project_skill(path: Path) -> bool:
+    """True for <project>/.claude/skills/**/SKILL.md, false for ~/.claude/skills and a toolkit's skills/."""
+    parts = path.parts
+    for i in range(len(parts) - 1):
+        if parts[i] == ".claude" and parts[i + 1] == "skills":
+            return Path(*parts[: i + 1]) != Path.home() / ".claude"
+    return False
+
+
 def main():
     """Process PostToolUse hook event."""
     if os.environ.get(_BYPASS_ENV) == "1":
@@ -73,6 +82,11 @@ def main():
 
         # Only act on skills/**/SKILL.md files
         if not SKILL_FILE_RE.search(file_path):
+            return
+
+        # A project's own .claude/skills/ follows Claude Code's frontmatter (name, description).
+        # The routing section is a toolkit rule, so it applies only to the user-level ~/.claude/skills.
+        if _is_project_skill(Path(file_path)):
             return
 
         # Check the file exists

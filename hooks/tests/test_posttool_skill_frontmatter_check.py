@@ -82,3 +82,24 @@ def test_non_skill_file_is_silent(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
+
+
+_NO_ROUTING = "---\nname: demo\ndescription: A project skill with no routing section.\n---\n\n# demo\n"
+
+
+def test_project_skill_is_silent(tmp_path: Path) -> None:
+    # <project>/.claude/skills follows Claude Code's frontmatter; routing is a toolkit rule.
+    skill = tmp_path / "project" / ".claude" / "skills" / "demo" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(_NO_ROUTING)
+    result = _run(skill, tmp_path)
+    assert result.returncode == 0
+    assert result.stdout.strip() == ""
+
+
+def test_user_level_skill_is_still_checked(tmp_path: Path) -> None:
+    skill = tmp_path / "home" / ".claude" / "skills" / "demo" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(_NO_ROUTING)
+    result = _run(skill, tmp_path)
+    assert "Missing routing section" in result.stdout
